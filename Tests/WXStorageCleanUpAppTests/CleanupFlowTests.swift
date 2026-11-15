@@ -1,6 +1,6 @@
 import XCTest
-@testable import WeChatStorageApp
-import WeChatStorageCore
+@testable import WXStorageCleanUpApp
+import WXStorageCleanUpCore
 
 @MainActor final class CleanupFlowTests: XCTestCase {
     private func waitUntilIdle(_ model: AppModel) async throws {

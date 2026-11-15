@@ -1,6 +1,6 @@
 import SwiftUI
 import AppKit
-import WeChatStorageCore
+import WXStorageCleanUpCore
 
 enum Page: String, CaseIterable, Identifiable {
     case overview = "空间概览", chats = "聊天与消息", unassigned = "未归属附件", history = "操作记录"

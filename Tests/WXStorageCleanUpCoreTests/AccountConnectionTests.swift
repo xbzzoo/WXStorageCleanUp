@@ -1,6 +1,6 @@
 import XCTest
 import Foundation
-@testable import WeChatStorageCore
+@testable import WXStorageCleanUpCore
 
 final class AccountConnectionTests: XCTestCase {
     var temporary: URL!

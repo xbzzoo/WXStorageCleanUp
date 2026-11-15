@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build pinned release dependencies for macOS 14 without changing Homebrew."""
 from pathlib import Path
+import argparse
 import hashlib
 import json
 import os
@@ -12,7 +13,6 @@ import tarfile
 
 PROJECT = Path(__file__).resolve().parents[1]
 ROOT = PROJECT / "build" / "dependencies"
-PREFIX = ROOT / "prefix"
 TARGET = "14.0"
 SOURCES = {
     "openssl-4.1.0": (
@@ -33,8 +33,8 @@ def run(*args, cwd=None, env=None, capture=False):
     return result.stdout.strip() if capture else ""
 
 
-def source(name):
-    downloads, sources = ROOT / "downloads", ROOT / "sources"
+def source(name, root):
+    downloads, sources = ROOT / "downloads", root / "sources"
     downloads.mkdir(parents=True, exist_ok=True)
     sources.mkdir(exist_ok=True)
     url, expected = SOURCES[name]
@@ -67,47 +67,51 @@ def minimum_os(binary):
     return versions
 
 
-def main():
+def main(architecture=None):
     if platform.system() != "Darwin":
         raise RuntimeError("Build on macOS with Xcode Command Line Tools")
-    architecture = platform.machine()
+    architecture = architecture or platform.machine()
     if architecture not in ("arm64", "x86_64"):
         raise RuntimeError("Unsupported build architecture: " + architecture)
+    root = ROOT if architecture == platform.machine() else ROOT / architecture
+    prefix = root / "prefix"
     expected = {"target": TARGET, "architecture": architecture, "sources": SOURCES}
-    manifest = PREFIX / "manifest.json"
-    binaries = [PREFIX / "bin" / "sqlcipher", PREFIX / "lib" / "libzstd.dylib"]
+    manifest = prefix / "manifest.json"
+    binaries = [prefix / "bin" / "sqlcipher", prefix / "lib" / "libzstd.dylib"]
     if manifest.exists() and all(p.is_file() for p in binaries):
         saved = json.loads(manifest.read_text())
         if saved == json.loads(json.dumps(expected)):
             for binary in binaries:
                 minimum_os(binary)
+                if run("lipo", "-archs", str(binary), capture=True) != architecture:
+                    raise RuntimeError("Cached dependency architecture mismatch: " + str(binary))
             print("Using verified macOS 14 dependency build", flush=True)
-            return
-    (PREFIX / "bin").mkdir(parents=True, exist_ok=True)
-    (PREFIX / "lib").mkdir(exist_ok=True)
+            return prefix
+    (prefix / "bin").mkdir(parents=True, exist_ok=True)
+    (prefix / "lib").mkdir(exist_ok=True)
     env = os.environ.copy()
     env.update({"MACOSX_DEPLOYMENT_TARGET": TARGET, "CC": "/usr/bin/clang", "CXX": "/usr/bin/clang++",
                 "SDKROOT": run("xcrun", "--show-sdk-path", capture=True),
                 "CFLAGS": "-O2 -arch " + architecture + " -mmacosx-version-min=" + TARGET,
                 "LDFLAGS": "-arch " + architecture + " -mmacosx-version-min=" + TARGET})
     jobs = str(min(6, os.cpu_count() or 2))
-    crypto = source("openssl-4.1.0")
+    crypto = source("openssl-4.1.0", root)
     print("Building static OpenSSL for macOS " + TARGET, flush=True)
     run("/usr/bin/perl", "./Configure", "darwin64-" + architecture + "-cc",
-        "no-shared", "no-apps", "no-tests", "no-module", "--prefix=" + str(PREFIX),
+        "no-shared", "no-apps", "no-tests", "no-module", "--prefix=" + str(prefix),
         "--openssldir=/etc/ssl", "--libdir=lib", cwd=crypto, env=env)
     run("make", "-j" + jobs, cwd=crypto, env=env)
     run("make", "install_sw", cwd=crypto, env=env)
-    cipher = source("sqlcipher-4.20.0")
+    cipher = source("sqlcipher-4.20.0", root)
     print("Building SQLCipher for macOS " + TARGET, flush=True)
-    cflags = env["CFLAGS"] + " -I" + str(PREFIX / "include") + " " + " ".join([
+    cflags = env["CFLAGS"] + " -I" + str(prefix / "include") + " " + " ".join([
         "-DSQLITE_HAS_CODEC", "-DSQLITE_ENABLE_JSON1", "-DSQLITE_ENABLE_FTS3",
         "-DSQLITE_ENABLE_FTS3_PARENTHESIS", "-DSQLITE_ENABLE_FTS5", "-DSQLITE_ENABLE_COLUMN_METADATA",
         "-DSQLITE_EXTRA_INIT=sqlcipher_extra_init", "-DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown"])
-    ldflags = env["LDFLAGS"] + " -L" + str(PREFIX / "lib") + " " + str(PREFIX / "lib/libcrypto.a")
+    ldflags = env["LDFLAGS"] + " -L" + str(prefix / "lib") + " " + str(prefix / "lib/libcrypto.a")
     ldflags += " -framework Security -framework CoreFoundation"
     run("./configure", "--disable-tcl", "--disable-shared", "--disable-readline", "--disable-load-extension",
-        "--with-tempstore=yes", "--prefix=" + str(PREFIX), "CFLAGS=" + cflags,
+        "--with-tempstore=yes", "--prefix=" + str(prefix), "CFLAGS=" + cflags,
         "LDFLAGS=" + ldflags, cwd=cipher, env=env)
     run("make", "-j" + jobs, "sqlite3", cwd=cipher, env=env)
     shutil.copy2(cipher / "sqlite3", binaries[0])
@@ -118,13 +122,15 @@ def main():
     links = run("otool", "-L", str(binaries[0]), capture=True)
     if "/opt/homebrew/" in links or "libcrypto." in links:
         raise RuntimeError("SQLCipher must use the locally compiled static crypto library")
-    zstd = source("zstd-1.5.7")
+    zstd = source("zstd-1.5.7", root)
     print("Building Zstandard for macOS " + TARGET, flush=True)
     run("make", "-C", "lib", "-j" + jobs, cwd=zstd, env=env)
     shutil.copy2((zstd / "lib/libzstd.dylib").resolve(), binaries[1])
     for binary in binaries:
         print(str(binary.name) + " deployment: " + str(minimum_os(binary)), flush=True)
-    notices = PREFIX / "share" / "licenses"
+        if run("lipo", "-archs", str(binary), capture=True) != architecture:
+            raise RuntimeError("Dependency architecture mismatch: " + str(binary))
+    notices = prefix / "share" / "licenses"
     notices.mkdir(parents=True, exist_ok=True)
     for name, folder in [("openssl", crypto), ("sqlcipher", cipher), ("zstd", zstd)]:
         for filename in ["LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING"]:
@@ -132,8 +138,11 @@ def main():
             if path.is_file():
                 shutil.copy2(path, notices / (name + "-" + filename))
     manifest.write_text(json.dumps(expected, indent=2) + "\n")
-    print("macOS 14 dependencies ready: " + str(PREFIX), flush=True)
+    print("macOS 14 dependencies ready: " + str(prefix), flush=True)
+    return prefix
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--arch", choices=("arm64", "x86_64"))
+    main(parser.parse_args().arch)

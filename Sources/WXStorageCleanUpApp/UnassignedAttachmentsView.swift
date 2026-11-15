@@ -1,5 +1,5 @@
 import SwiftUI
-import WeChatStorageCore
+import WXStorageCleanUpCore
 
 struct UnassignedAttachmentsView: View {
     @EnvironmentObject var model: AppModel

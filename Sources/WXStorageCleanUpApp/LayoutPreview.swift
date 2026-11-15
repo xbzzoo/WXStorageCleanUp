@@ -1,6 +1,6 @@
 import SwiftUI
 import AppKit
-import WeChatStorageCore
+import WXStorageCleanUpCore
 
 private final class LayoutCheckWindow: NSWindow {
     override var canBecomeKey: Bool { true }

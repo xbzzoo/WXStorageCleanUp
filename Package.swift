@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "WeChatStorage",
+    name: "WXStorageCleanUp",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "WeChatStorage", targets: ["WeChatStorageApp"]),
-        .library(name: "WeChatStorageCore", targets: ["WeChatStorageCore"])
+        .executable(name: "WXStorageCleanUp", targets: ["WXStorageCleanUpApp"]),
+        .library(name: "WXStorageCleanUpCore", targets: ["WXStorageCleanUpCore"])
     ],
     targets: [
         .systemLibrary(name: "CSQLite"),
-        .target(name: "WeChatStorageCore", dependencies: ["CSQLite"]),
-        .executableTarget(name: "WeChatStorageApp", dependencies: ["WeChatStorageCore"]),
-        .testTarget(name: "WeChatStorageCoreTests", dependencies: ["WeChatStorageCore", "CSQLite"]),
-        .testTarget(name: "WeChatStorageAppTests", dependencies: ["WeChatStorageApp", "WeChatStorageCore"])
+        .target(name: "WXStorageCleanUpCore", dependencies: ["CSQLite"]),
+        .executableTarget(name: "WXStorageCleanUpApp", dependencies: ["WXStorageCleanUpCore"]),
+        .testTarget(name: "WXStorageCleanUpCoreTests", dependencies: ["WXStorageCleanUpCore", "CSQLite"]),
+        .testTarget(name: "WXStorageCleanUpAppTests", dependencies: ["WXStorageCleanUpApp", "WXStorageCleanUpCore"])
     ]
 )

@@ -1,7 +1,7 @@
 import XCTest
 import Foundation
 import CSQLite
-@testable import WeChatStorageCore
+@testable import WXStorageCleanUpCore
 
 final class StorageTests: XCTestCase {
     var temporaryDirectories = [URL]()

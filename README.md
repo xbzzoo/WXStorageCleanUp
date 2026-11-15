@@ -1,128 +1,45 @@
-<p align="center"><img src="assets/AppIcon.png" width="144" alt="微空间应用图标"></p>
+<p align="center"><img src="assets/AppIcon.png" width="112" alt="WXStorageCleanUp 图标"></p>
 
-# 微空间 · WeChatStorage
+# WXStorageCleanUp
 
-一个本地运行的 macOS 微信存储管理工具：看清空间去向，按聊天、消息或未归属附件整理本地文件。
+macOS 微信存储整理工具：查看空间占用，按聊天、消息或未归属附件清理，支持多账号切换。独立第三方项目，非微信官方产品。
 
-独立第三方项目，非微信官方产品。当前版本为 **v0.3.1 预览版**。
+## 下载安装
 
-## 下载与安装
+**v0.3.2 预览版 · 最低部署版本 macOS 14.0。** 在苹果菜单 →「关于本机」查看芯片，选择对应安装包：
 
-**预编译安装包要求 macOS 14.0 或更新版本、Apple Silicon（arm64）。Intel 不支持此安装包。**
-
-可在苹果菜单 →「关于本机」查看系统版本和芯片；Apple M 系列芯片可使用此安装包。应用及随包依赖的最低部署版本均为 14.0，但 macOS 14 / 15 尚未实机回归。
-
-### 安装应用（推荐 DMG）
-
-1. [下载 v0.3.1 DMG 安装文件](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.1/WeChatStorage-0.3.1-macOS-arm64.dmg)。请下载 Release 中的安装文件，`Source code` 是源码，不能直接安装。
-2. 双击下载的 `.dmg` 文件，将窗口中的「微空间.app」拖到旁边的 **Applications（应用程序）** 文件夹。
-3. 复制完成后，在 Finder 侧栏推出「微空间」磁盘映像。
-4. 从 Finder →「应用程序」打开「微空间」，之后也从这里启动。
-
-也可[下载 ZIP 应用包](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.1/WeChatStorage-0.3.1-macOS-arm64.zip)，双击解压，将「微空间.app」拖到「应用程序」，然后从该目录打开。DMG 与 ZIP 二选一即可。
-
-### 首次打开被系统拦截
-
-安装包使用本地 ad-hoc 签名，**尚未取得 Developer ID 签名或 Apple 公证**。如果提示「无法验证开发者」或「Apple 无法检查其是否包含恶意软件」，请先确认文件来自本仓库 Release，再按以下步骤操作：
-
-1. 尝试打开「微空间」后，打开「系统设置」→「隐私与安全性」。
-2. 向下找到针对「微空间」的拦截提示，点击「仍要打开」。
-3. 按系统提示完成验证，并在再次出现的确认框中点击「打开」。
-
-以上为 [Apple 官方提供的单个应用放行方式](https://support.apple.com/zh-cn/102445)，无需关闭 SIP 或系统整体安全检查。若提示应用已损坏，请先删除该应用副本，从 Release 重新下载并校验文件完整性。
-
-### 自动连接聊天索引的准备
-
-应用已包含按 macOS 14.0 编译的 SQLCipher、OpenSSL（静态链接）和 Zstandard，**扫描空间和手动整理未归属附件无需安装 Homebrew 或开发工具**。首次自动连接聊天索引需要 Xcode 或 Command Line Tools 提供的系统 Python / LLDB。
-
-若尚未安装开发工具，可打开「终端」，执行：
-
-```sh
-xcode-select --install
-```
-
-按系统弹窗完成安装，然后重新打开「微空间」并连接账号。已安装完整 Xcode 的用户通常无需另装 Command Line Tools；安装方式见 [Apple 官方文档](https://developer.apple.com/documentation/xcode/installing-the-command-line-tools)。连接时按提示完成本人微信登录确认及开发者工具授权，具体操作见下方「使用流程」。
-
-### 升级与下载校验
-
-升级前退出旧版「微空间」，按上述步骤将新版拖入「应用程序」，出现同名提示时选择「替换」。删除「下载」或其他目录中不再需要的旧应用副本和旧安装文件，避免误开旧版；替换应用不会删除微信数据和本工具的账号连接记录。
-
-如需校验下载完整性，可从[同一版本发布页面](https://github.com/xbzzoo/WeChatStorage/releases/tag/v0.3.1)下载 `SHA256SUMS.txt`，在「终端」执行以下命令，并将输出与文件中对应 DMG 的 SHA-256 比较：
-
-```sh
-cd ~/Downloads
-shasum -a 256 WeChatStorage-0.3.1-macOS-arm64.dmg
-```
-
-如果浏览器将文件保存到其他目录，请先切换到实际下载目录；校验 ZIP 时将命令中的文件名替换为 ZIP 文件名。
-
-## 可以做什么
-
-| 功能 | 行为 |
+| 芯片 | 下载 |
 | --- | --- |
-| 空间概览 | 扫描微信 Data、xwechat_files 或单个账号目录，统计应用、附件、数据库及其他数据 |
-| 聊天与消息 | 连接本地索引后显示聊天名称，按聊天或聊天内消息选择已匹配的附件 |
-| 未归属附件 | 按账号列出尚未归集到聊天的附件，搜索、类型筛选、多选、查看文件位置 |
-| 清理与恢复 | 预览后移入系统废纸篓，逐项记录结果；可恢复仍在废纸篓且原路径无冲突的项目 |
-| 多账号 | 选择和切换本地账号，连接缓存与清理选择按账号隔离 |
-| 自动连接 | 在私有临时微信副本中获取并验证当前账号所需密钥，创建只读索引快照 |
+| Intel | [Intel DMG（x86_64）](https://github.com/xbzzoo/WXStorageCleanUp/releases/download/v0.3.2/WXStorageCleanUp-0.3.2-macOS-x86_64.dmg) |
+| Apple M 系列 | [Apple Silicon DMG（arm64）](https://github.com/xbzzoo/WXStorageCleanUp/releases/download/v0.3.2/WXStorageCleanUp-0.3.2-macOS-arm64.dmg) |
 
-工具保留微信数据库和文字消息。按消息清理指移除消息对应的**本地附件**，不会删除消息条目或压缩微信数据库。
+ZIP、SHA-256 校验文件及更新说明见 [Release](https://github.com/xbzzoo/WXStorageCleanUp/releases/tag/v0.3.2)。Intel 无法运行 arm64 包，架构不匹配时更换安装包即可。
 
-## 使用流程
+1. 打开 DMG，将 `WXStorageCleanUp.app` 拖入 **Applications（应用程序）**，复制后推出磁盘映像。
+2. 从「应用程序」启动。预览版尚未 Apple 公证；若被拦截，尝试打开后在「系统设置 → 隐私与安全性」点击「仍要打开」，详见 [Apple 说明](https://support.apple.com/zh-cn/102445)。
+3. 点击「扫描本机微信」。需要聊天名称和消息归属时，打开「连接聊天索引」并选择账号。
+4. 选择附件、核对预览，退出微信后清理。
 
-1. 打开应用，点击「扫描本机微信」，或通过「选择目录」指定数据位置。遇到目录权限提示时按系统要求授权。
-2. 在概览打开「连接聊天索引」，选择当前账号并执行自动连接；也可从应用菜单打开连接窗口。
-3. 首次连接会请求原版微信退出，再打开临时副本。请提前保存草稿，在临时窗口进入对应账号，并按提示打开联系人及相关聊天。
-4. 在聊天、消息或未归属附件列表选择文件，核对预览后移入废纸篓。清理执行前需要退出微信。
-5. 清理完成弹窗会提示核对废纸篓。**移入废纸篓仍占空间；清空相应项目后才可能回收空间。** 清空后无法再通过本工具恢复。
+首次自动连接需 Xcode 或 Command Line Tools（`xcode-select --install`），并需本人在临时微信窗口完成登录确认，请提前保存草稿。扫描及手动整理附件无需 Homebrew 或开发工具。
 
-临时微信使用本机账号数据，可能正常联网并更新缓存、登录状态；请仅用于登录和加载索引。工具只对自己的临时副本增加调试能力，不重签名已安装的原版微信，不调用 sudo，不关闭 SIP。
+升级前退出旧版并替换应用；从「微空间」升级后删除旧 `微空间.app`，账号连接和操作记录保留。
 
-## 怎样理解占用与共享文件
+## 使用须知
 
-- 总占用是扫描数据和应用本体的分配空间估算；聊天行展示已归集附件的逻辑大小，两者口径不同。
-- 未归属只表示尚未识别聊天归属，**不代表无用文件**。视频、语音、转发媒体等索引映射尚未完整覆盖，不同微信构建的行为可能不同。
-- 未归属附件允许清理选中的硬链接路径，其他链接保留。若还有其他链接，即使清空本次废纸篓项目，也不会释放该文件的数据空间。
-- 聊天 / 消息清理仍保护未选消息引用及硬链接共享附件；手动文件清理不会自动扩大到同一文件的其他路径。
-- APFS 克隆、快照和后台活动也会影响可回收空间，不能把文件大小直接当作实际释放量。
+- **清理仅移入废纸篓，核对并清空相应项目后才可能释放空间。** 清空后无法通过本工具恢复；共享硬链接、APFS 快照等可能继续占用空间。
+- 保留文字消息和微信数据库；未归属附件可能仍被聊天使用，请按需选择。总占用与聊天附件统计口径不同。
+- 聊天数据和密钥仅在本机处理。Intel 版已在 Rosetta 下验证，Intel 真机及 macOS 14 / 15 尚未实机回归。
 
-## 本地数据与隐私
+## 源码运行
 
-本工具不上传聊天数据或密钥。扫描结果在内存中处理，连接密钥、明文索引快照和操作日志保存在本机私有目录下；目录权限 0700，敏感文件 0600。
-
-「忘记账号连接」可删除对应连接缓存；连接窗口也可清除本工具创建的明文快照。导出的分析报告可能包含聊天名称和文件路径，请自行保管。
-
-仓库和安装包不包含个人账号密钥、聊天数据库、扫描报告或操作日志。开发验证使用独立人工夹具。
-
-## 从源码运行
-
-源码和预编译包均以 macOS 14.0 为最低部署目标，覆盖 macOS 15.8.1。源码要求 Swift 5.10+。v0.3.1 从固定版本源码重编译所有随包依赖，不再使用要求 macOS 26 的 Homebrew 二进制。打包会逐个检查实际部署版本，任何组件超过 14.0 都会拒绝发布。
-
-当前仅在 macOS 26 真机完成运行验证，尚未在 macOS 14 / 15 真机回归；部署目标检查不等同于完整系统兼容性验证。
+需要 Swift 5.10+ 和 Xcode 开发工具：
 
 ```sh
-swift run WeChatStorage
+swift run WXStorageCleanUp
 swift test
-/usr/bin/python3 -m unittest discover -s Tests/Python -v
+python3 scripts/package_app.py --arch x86_64  # Apple Silicon 改为 arm64
 ```
 
-打包需要 Xcode 开发工具、Python 3.8+、系统 Perl / Tcl / make 和网络连接。首次自动下载校验过的源码并编译 SQLCipher、OpenSSL 和 Zstandard，耗时数分钟；后续复用本地依赖构建：
+打包会下载并校验依赖源码，生成应用、DMG 和 ZIP；首次构建需数分钟。
 
-```sh
-python3 scripts/package_app.py
-```
-
-输出：
-
-- `build/微空间.app`
-- `build/release/WeChatStorage-0.3.1-macOS-arm64.dmg`
-- `build/release/WeChatStorage-0.3.1-macOS-arm64.zip`
-- `build/release/SHA256SUMS.txt`
-- `build/release/COMPATIBILITY.json`：每个二进制的实际部署下限
-
-构建脚本生成完整 `.icns`，复制依赖和许可说明，执行本地签名校验，并创建带 Applications 链接的 DMG。它不安装应用，也不修改微信。正式 Developer ID 签名与公证需要发行者自己的证书和凭据。
-
-开发布局检查可运行 `build/微空间.app/Contents/MacOS/WeChatStorage --layout-check build/LayoutChecks`。该入口只使用人工演示数据，覆盖完整窗口、导航、清理选择和完成提示，不连接真实微信。
-
-[验证记录](docs/validation.md) · [图标设计与生成提示词](docs/icon-design.md) · [发布说明](docs/releases/v0.3.1.md)
+[验证记录](docs/validation.md) · [发布说明](docs/releases/v0.3.2.md) · [图标设计](docs/icon-design.md)

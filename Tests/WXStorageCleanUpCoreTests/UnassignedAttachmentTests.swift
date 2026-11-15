@@ -1,5 +1,5 @@
 import XCTest
-@testable import WeChatStorageCore
+@testable import WXStorageCleanUpCore
 
 final class UnassignedAttachmentTests: XCTestCase {
     private var temporary: URL!

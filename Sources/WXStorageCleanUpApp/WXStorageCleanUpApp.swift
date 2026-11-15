@@ -1,7 +1,7 @@
 import SwiftUI
-import WeChatStorageCore
+import WXStorageCleanUpCore
 
-@main struct WeChatStorageApp: App {
+@main struct WXStorageCleanUpApp: App {
     @StateObject private var model = AppModel()
     init() {
         if let flag = CommandLine.arguments.firstIndex(of: "--layout-check"), CommandLine.arguments.count > flag + 1 {
@@ -45,7 +45,7 @@ import WeChatStorageCore
         }
     }
     var body: some Scene {
-        WindowGroup("微空间") {
+        WindowGroup("WXStorageCleanUp") {
             MainView().environmentObject(model).frame(minWidth: 1080, minHeight: 700)
                 .tint(Color.accentGreen)
         }

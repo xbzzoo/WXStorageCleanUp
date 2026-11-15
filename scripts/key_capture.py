@@ -141,6 +141,7 @@ class ChildCapture:
         self.process = None
         self.target = None
         self.lldb = None
+        self.architecture = None
 
     def cancel(self, _signal, _frame):
         self.cancelled = True
@@ -153,7 +154,18 @@ class ChildCapture:
             if thread.GetStopReasonDataCount() < 2 or thread.GetStopReasonDataAtIndex(0) != breakpoint_id:
                 continue
             frame = thread.GetFrameAtIndex(0)
-            registers = [frame.FindRegister("x%d" % index).GetValueAsUnsigned() for index in range(1, 7)]
+            if self.architecture.startswith("arm64"):
+                registers = [frame.FindRegister("x%d" % index).GetValueAsUnsigned() for index in range(1, 7)]
+            else:
+                # macOS x86_64 follows the SysV ABI: arguments 2–6 use registers,
+                # and the seventh argument (rounds) follows the return address.
+                registers = [frame.FindRegister(name).GetValueAsUnsigned()
+                             for name in ("rsi", "rdx", "rcx", "r8", "r9")]
+                stack = frame.FindRegister("rsp").GetValueAsUnsigned()
+                rounds = self.read(stack + 8, 4)
+                if len(rounds) != 4:
+                    continue
+                registers.append(int.from_bytes(rounds, "little"))
             secret_address, length, salt_address, salt_length, algorithm, iterations = registers
             if algorithm != 5 or iterations not in (2, 256000) or salt_length != 16 or not 1 <= length <= 256:
                 continue
@@ -182,8 +194,13 @@ class ChildCapture:
         self.debugger = lldb.SBDebugger.Create(False)
         self.debugger.SkipLLDBInitFiles(True)
         self.debugger.SetAsync(True)
+        # Inspect the entry ABI before a prologue changes registers or the stack.
+        error = self.debugger.SetInternalVariable("target.skip-prologue", "false", self.debugger.GetInstanceName())
+        if error.Fail():
+            raise RuntimeError("breakpoint_unavailable")
         self.target = self.debugger.CreateTarget(str(Path(executable).resolve(strict=True)))
-        if not self.target.IsValid() or not self.target.GetTriple().startswith("arm64"):
+        self.architecture = self.target.GetTriple().split("-", 1)[0]
+        if not self.target.IsValid() or not (self.architecture.startswith("arm64") or self.architecture == "x86_64"):
             raise RuntimeError("unsupported_target_architecture")
         breakpoint = self.target.BreakpointCreateByName("CCKeyDerivationPBKDF")
         if not breakpoint.IsValid():

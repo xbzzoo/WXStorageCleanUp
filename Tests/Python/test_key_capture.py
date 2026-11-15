@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import platform
 from pathlib import Path
 import plistlib
 import shutil
@@ -89,6 +90,15 @@ class KeyCaptureTests(unittest.TestCase):
         self.assertTrue(json.loads(result.stdout)["complete"])
 
     def test_real_lldb_capture_of_owned_cli_fixture(self):
+        self.capture_owned_cli_fixture(platform.machine())
+
+    @unittest.skipUnless(platform.machine() == "arm64", "Cross-architecture validation requires an Apple Silicon host")
+    def test_real_lldb_capture_of_owned_intel_cli_fixture(self):
+        if subprocess.run(["/usr/bin/arch", "-x86_64", "/usr/bin/true"], capture_output=True).returncode:
+            self.skipTest("Rosetta is not installed")
+        self.capture_owned_cli_fixture("x86_64")
+
+    def capture_owned_cli_fixture(self, architecture):
         python_path = subprocess.check_output(["/usr/bin/xcrun", "lldb", "-P"], text=True).strip()
         source = self.root / "pbkdf_fixture.c"
         salt = bytes(value ^ 0x3a for value in self.page[:16])
@@ -107,7 +117,7 @@ class KeyCaptureTests(unittest.TestCase):
         }
         """ % (",".join(str(value) for value in self.key), ",".join(str(value) for value in salt)))
         executable = self.root / "pbkdf_fixture"
-        subprocess.run(["/usr/bin/xcrun", "clang", "-O0", "-g", str(source), "-o", str(executable)], check=True,
+        subprocess.run(["/usr/bin/xcrun", "clang", "-arch", architecture, "-O0", "-g", str(source), "-o", str(executable)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         entitlements = self.root / "fixture.plist"
         entitlements.write_bytes(plistlib.dumps({"com.apple.security.get-task-allow": True}))

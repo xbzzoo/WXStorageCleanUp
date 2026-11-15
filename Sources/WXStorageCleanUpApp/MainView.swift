@@ -1,6 +1,6 @@
 import SwiftUI
 import AppKit
-import WeChatStorageCore
+import WXStorageCleanUpCore
 
 struct MainView: View {
     @EnvironmentObject var model: AppModel
@@ -10,7 +10,8 @@ struct MainView: View {
                 HStack(spacing: 11) {
                     AppBrandIcon(size: 40)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("微空间").font(.system(size: 20, weight: .semibold))
+                        Text("WXStorageCleanUp").font(.system(size: 14, weight: .semibold))
+                            .lineLimit(1).minimumScaleFactor(0.75)
                         Text("微信存储管理").font(.caption).foregroundStyle(.secondary)
                     }
                 }.padding(.horizontal, 17).padding(.top, 27)

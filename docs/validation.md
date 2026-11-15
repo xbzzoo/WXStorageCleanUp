@@ -16,7 +16,7 @@
 | 多账号 | 同名联系人内部 ID 的隔离、连接缓存、选择清空、跨账号计划拒绝 |
 | 完成提示 | 普通 / 共享附件清理后的废纸篓提示、Finder 入口及关闭后继续操作 |
 
-Swift 测试基线为 36 项。Python 取钥组件另有 7 项测试，其中实际调试验证仅针对自有人工命令行程序。
+v0.3.2 的 36 项 Swift 测试分别在 arm64 和 Rosetta x86_64 下通过。Python 取钥组件的 8 项测试通过，其中实际调试验证仅针对自有人工命令行程序，覆盖 arm64 和 x86_64。
 
 ## 界面检查
 
@@ -25,6 +25,8 @@ Swift 测试基线为 36 项。Python 取钥组件另有 7 项测试，其中实
 通过向演示窗口投递鼠标事件验证聊天行、复选框、返回和侧栏切换，以及共享附件勾选后生成清理计划。完成清理后检查原生系统弹窗的标题、废纸篓说明和 Finder 按钮，并点击「知道了」继续操作。
 
 这些检查不等同于全部主窗口操作的人工作业回归。Intel、不同 macOS 主版本和不同微信构建仍需分别验证。
+
+v0.3.2 从安装文件取出两个架构的应用后，分别通过 19 项布局与交互检查；x86_64 检查在 Rosetta 下运行。随包 Intel SQLCipher 另验证了人工加密数据库的写入和读取。
 
 ## 发布包检查
 
@@ -35,6 +37,6 @@ Swift 测试基线为 36 项。Python 取钥组件另有 7 项测试，其中实
 - 从安装文件复制应用至独立验证目录后运行。
 - DMG / ZIP 的 SHA-256 和 GitHub Release 附件回读校验。
 
-当前发行方式为 ad-hoc 签名预览包，未启用 Hardened Runtime，未做 Developer ID 签名或 Apple 公证。v0.3.1 发布包的应用、SQLCipher、Zstandard 实际部署版本均为 14.0；OpenSSL 静态链接到 SQLCipher。源码归档固定版本并校验 SHA-256，构建过程不修改 Homebrew。Intel 不属于本次预编译包范围。
+当前发行方式为 ad-hoc 签名预览包，未启用 Hardened Runtime，未做 Developer ID 签名或 Apple 公证。v0.3.2 发布包的应用、SQLCipher、Zstandard 实际部署版本均为 14.0；OpenSSL 静态链接到 SQLCipher。源码归档固定版本并校验 SHA-256，构建过程不修改 Homebrew。分别提供 arm64 和 x86_64 安装包，并逐组件检查架构，拒绝混装依赖。
 
-运行验证在 macOS 26 的 Apple Silicon 真机完成，macOS 14 / 15 尚未实机回归。发布附件中的 `COMPATIBILITY.json` 明确记录该限制。
+运行验证在 macOS 26 的 Apple Silicon 真机完成；x86_64 应用、SQLCipher 和取钥测试程序在 Rosetta 下验证。Intel 真机及 macOS 14 / 15 尚未实机回归。各架构的 `.compatibility.json` 明确记录该限制。

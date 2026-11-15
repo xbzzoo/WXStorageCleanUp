@@ -41,9 +41,6 @@ public struct AutomaticConnection: Sendable {
 
     public func connect(account: Account, inventory: Inventory,
                         progress: @escaping @Sendable (AutomaticConnectionProgress) -> Void) throws -> AutomaticConnectionResult {
-        #if !arch(arm64)
-        throw StorageError.invalid("自动取钥目前支持 Apple Silicon 原生运行。其他架构仍可手动导入索引。")
-        #else
         guard let helper = Self.helperURL, let application = Self.installedApplication() else {
             throw StorageError.invalid("未找到原版微信应用或本地连接组件。")
         }
@@ -142,7 +139,6 @@ public struct AutomaticConnection: Sendable {
         try store.save(accountID: account.id, root: fresh.root, snapshot: snapshot)
         progress(.init(phase: "所选账号已连接", verified: names.count, total: names.count))
         return AutomaticConnectionResult(inventory: fresh, index: index, reusedKeys: reused)
-        #endif
     }
 
     private static func quitInstalledApplication(_ application: URL) throws {
