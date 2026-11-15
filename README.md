@@ -10,15 +10,51 @@
 
 **预编译安装包要求 macOS 14.0 或更新版本、Apple Silicon（arm64）。Intel 不支持此安装包。**
 
-- [下载 DMG 安装文件](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.1/WeChatStorage-0.3.1-macOS-arm64.dmg)：打开后将「微空间.app」拖入 Applications。
-- [下载 ZIP 应用包](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.1/WeChatStorage-0.3.1-macOS-arm64.zip)：解压后将应用拖入「应用程序」。
-- [发布说明与 SHA-256 校验文件](https://github.com/xbzzoo/WeChatStorage/releases/tag/v0.3.1)。
+可在苹果菜单 →「关于本机」查看系统版本和芯片；Apple M 系列芯片可使用此安装包。应用及随包依赖的最低部署版本均为 14.0，但 macOS 14 / 15 尚未实机回归。
 
-升级时先退出旧版，在 Applications 出现同名应用提示时选择「替换」，避免保留多个应用副本。替换应用不会删除微信数据和本工具的账号连接记录。
+### 安装应用（推荐 DMG）
 
-安装包使用本地 ad-hoc 签名，**尚未取得 Developer ID 签名或 Apple 公证**。首次打开可能被 Gatekeeper 阻止；确认下载来源后，可按 [Apple 官方说明](https://support.apple.com/102445)为该应用单独放行。无需关闭 SIP 或系统整体安全检查。
+1. [下载 v0.3.1 DMG 安装文件](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.1/WeChatStorage-0.3.1-macOS-arm64.dmg)。请下载 Release 中的安装文件，`Source code` 是源码，不能直接安装。
+2. 双击下载的 `.dmg` 文件，将窗口中的「微空间.app」拖到旁边的 **Applications（应用程序）** 文件夹。
+3. 复制完成后，在 Finder 侧栏推出「微空间」磁盘映像。
+4. 从 Finder →「应用程序」打开「微空间」，之后也从这里启动。
 
-应用包已包含按 macOS 14.0 编译的 SQLCipher、OpenSSL（静态链接）和 Zstandard，扫描和手动整理附件无需安装 Homebrew。**首次自动连接聊天索引仍需要 Xcode 或 Command Line Tools 提供的系统 Python / LLDB，以及本人完成微信登录确认。**
+也可[下载 ZIP 应用包](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.1/WeChatStorage-0.3.1-macOS-arm64.zip)，双击解压，将「微空间.app」拖到「应用程序」，然后从该目录打开。DMG 与 ZIP 二选一即可。
+
+### 首次打开被系统拦截
+
+安装包使用本地 ad-hoc 签名，**尚未取得 Developer ID 签名或 Apple 公证**。如果提示「无法验证开发者」或「Apple 无法检查其是否包含恶意软件」，请先确认文件来自本仓库 Release，再按以下步骤操作：
+
+1. 尝试打开「微空间」后，打开「系统设置」→「隐私与安全性」。
+2. 向下找到针对「微空间」的拦截提示，点击「仍要打开」。
+3. 按系统提示完成验证，并在再次出现的确认框中点击「打开」。
+
+以上为 [Apple 官方提供的单个应用放行方式](https://support.apple.com/zh-cn/102445)，无需关闭 SIP 或系统整体安全检查。若提示应用已损坏，请先删除该应用副本，从 Release 重新下载并校验文件完整性。
+
+### 自动连接聊天索引的准备
+
+应用已包含按 macOS 14.0 编译的 SQLCipher、OpenSSL（静态链接）和 Zstandard，**扫描空间和手动整理未归属附件无需安装 Homebrew 或开发工具**。首次自动连接聊天索引需要 Xcode 或 Command Line Tools 提供的系统 Python / LLDB。
+
+若尚未安装开发工具，可打开「终端」，执行：
+
+```sh
+xcode-select --install
+```
+
+按系统弹窗完成安装，然后重新打开「微空间」并连接账号。已安装完整 Xcode 的用户通常无需另装 Command Line Tools；安装方式见 [Apple 官方文档](https://developer.apple.com/documentation/xcode/installing-the-command-line-tools)。连接时按提示完成本人微信登录确认及开发者工具授权，具体操作见下方「使用流程」。
+
+### 升级与下载校验
+
+升级前退出旧版「微空间」，按上述步骤将新版拖入「应用程序」，出现同名提示时选择「替换」。删除「下载」或其他目录中不再需要的旧应用副本和旧安装文件，避免误开旧版；替换应用不会删除微信数据和本工具的账号连接记录。
+
+如需校验下载完整性，可从[同一版本发布页面](https://github.com/xbzzoo/WeChatStorage/releases/tag/v0.3.1)下载 `SHA256SUMS.txt`，在「终端」执行以下命令，并将输出与文件中对应 DMG 的 SHA-256 比较：
+
+```sh
+cd ~/Downloads
+shasum -a 256 WeChatStorage-0.3.1-macOS-arm64.dmg
+```
+
+如果浏览器将文件保存到其他目录，请先切换到实际下载目录；校验 ZIP 时将命令中的文件名替换为 ZIP 文件名。
 
 ## 可以做什么
 
