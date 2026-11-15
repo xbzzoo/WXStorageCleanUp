@@ -32,11 +32,16 @@ public enum WeChatProcess {
 }
 
 public enum SnapshotService {
+    static var developmentDependencyRoot: URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("build/dependencies/prefix")
+    }
     public static var defaultDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/WeChatStorage/Snapshots")
     }
     public static func sqlcipherURL() -> URL? {
         let paths: [String?] = [Bundle.main.resourceURL.map { $0.appendingPathComponent("sqlcipher").path },
+            developmentDependencyRoot.appendingPathComponent("bin/sqlcipher").path,
             "/opt/homebrew/bin/sqlcipher", "/usr/local/bin/sqlcipher"]
         return paths.compactMap { $0 }.first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
     }

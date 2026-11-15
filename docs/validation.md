@@ -35,4 +35,6 @@ Swift 测试基线为 36 项。Python 取钥组件另有 7 项测试，其中实
 - 从安装文件复制应用至独立验证目录后运行。
 - DMG / ZIP 的 SHA-256 和 GitHub Release 附件回读校验。
 
-当前发行方式为 ad-hoc 签名预览包，未启用 Hardened Runtime，未做 Developer ID 签名或 Apple 公证。发布包要求 macOS 26+、Apple Silicon；并不承诺 macOS 14 或 Intel 二进制兼容。
+当前发行方式为 ad-hoc 签名预览包，未启用 Hardened Runtime，未做 Developer ID 签名或 Apple 公证。v0.3.1 发布包的应用、SQLCipher、Zstandard 实际部署版本均为 14.0；OpenSSL 静态链接到 SQLCipher。源码归档固定版本并校验 SHA-256，构建过程不修改 Homebrew。Intel 不属于本次预编译包范围。
+
+运行验证在 macOS 26 的 Apple Silicon 真机完成，macOS 14 / 15 尚未实机回归。发布附件中的 `COMPATIBILITY.json` 明确记录该限制。

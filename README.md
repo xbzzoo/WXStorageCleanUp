@@ -4,21 +4,21 @@
 
 一个本地运行的 macOS 微信存储管理工具：看清空间去向，按聊天、消息或未归属附件整理本地文件。
 
-独立第三方项目，非微信官方产品。当前版本为 **v0.3.0 预览版**。
+独立第三方项目，非微信官方产品。当前版本为 **v0.3.1 预览版**。
 
 ## 下载与安装
 
-**预编译安装包要求 macOS 26.0 或更新版本、Apple Silicon（arm64）。Intel 不支持此安装包。**
+**预编译安装包要求 macOS 14.0 或更新版本、Apple Silicon（arm64）。Intel 不支持此安装包。**
 
-- [下载 DMG 安装文件](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.0/WeChatStorage-0.3.0-macOS-arm64.dmg)：打开后将「微空间.app」拖入 Applications。
-- [下载 ZIP 应用包](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.0/WeChatStorage-0.3.0-macOS-arm64.zip)：解压后将应用拖入「应用程序」。
-- [发布说明与 SHA-256 校验文件](https://github.com/xbzzoo/WeChatStorage/releases/tag/v0.3.0)。
+- [下载 DMG 安装文件](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.1/WeChatStorage-0.3.1-macOS-arm64.dmg)：打开后将「微空间.app」拖入 Applications。
+- [下载 ZIP 应用包](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.1/WeChatStorage-0.3.1-macOS-arm64.zip)：解压后将应用拖入「应用程序」。
+- [发布说明与 SHA-256 校验文件](https://github.com/xbzzoo/WeChatStorage/releases/tag/v0.3.1)。
 
 升级时先退出旧版，在 Applications 出现同名应用提示时选择「替换」，避免保留多个应用副本。替换应用不会删除微信数据和本工具的账号连接记录。
 
 安装包使用本地 ad-hoc 签名，**尚未取得 Developer ID 签名或 Apple 公证**。首次打开可能被 Gatekeeper 阻止；确认下载来源后，可按 [Apple 官方说明](https://support.apple.com/102445)为该应用单独放行。无需关闭 SIP 或系统整体安全检查。
 
-应用包已包含 SQLCipher、OpenSSL 和 Zstandard，扫描和手动整理附件无需安装 Homebrew。**首次自动连接聊天索引仍需要 Xcode 或 Command Line Tools 提供的系统 Python / LLDB，以及本人完成微信登录确认。**
+应用包已包含按 macOS 14.0 编译的 SQLCipher、OpenSSL（静态链接）和 Zstandard，扫描和手动整理附件无需安装 Homebrew。**首次自动连接聊天索引仍需要 Xcode 或 Command Line Tools 提供的系统 Python / LLDB，以及本人完成微信登录确认。**
 
 ## 可以做什么
 
@@ -61,7 +61,9 @@
 
 ## 从源码运行
 
-Swift Package 的源码最低目标为 macOS 14，要求 Swift 5.10+。**预编译包的 macOS 26 下限来自所带依赖库**；自行构建时，打包脚本会检查全部二进制的实际部署版本并写入安装包信息。
+源码和预编译包均以 macOS 14.0 为最低部署目标，覆盖 macOS 15.8.1。源码要求 Swift 5.10+。v0.3.1 从固定版本源码重编译所有随包依赖，不再使用要求 macOS 26 的 Homebrew 二进制。打包会逐个检查实际部署版本，任何组件超过 14.0 都会拒绝发布。
+
+当前仅在 macOS 26 真机完成运行验证，尚未在 macOS 14 / 15 真机回归；部署目标检查不等同于完整系统兼容性验证。
 
 ```sh
 swift run WeChatStorage
@@ -69,22 +71,22 @@ swift test
 /usr/bin/python3 -m unittest discover -s Tests/Python -v
 ```
 
-打包需要 Xcode 开发工具、Python 3.8+、SQLCipher 和 Zstandard：
+打包需要 Xcode 开发工具、Python 3.8+、系统 Perl / Tcl / make 和网络连接。首次自动下载校验过的源码并编译 SQLCipher、OpenSSL 和 Zstandard，耗时数分钟；后续复用本地依赖构建：
 
 ```sh
-brew install sqlcipher zstd
 python3 scripts/package_app.py
 ```
 
 输出：
 
 - `build/微空间.app`
-- `build/release/WeChatStorage-0.3.0-macOS-arm64.dmg`
-- `build/release/WeChatStorage-0.3.0-macOS-arm64.zip`
+- `build/release/WeChatStorage-0.3.1-macOS-arm64.dmg`
+- `build/release/WeChatStorage-0.3.1-macOS-arm64.zip`
 - `build/release/SHA256SUMS.txt`
+- `build/release/COMPATIBILITY.json`：每个二进制的实际部署下限
 
 构建脚本生成完整 `.icns`，复制依赖和许可说明，执行本地签名校验，并创建带 Applications 链接的 DMG。它不安装应用，也不修改微信。正式 Developer ID 签名与公证需要发行者自己的证书和凭据。
 
 开发布局检查可运行 `build/微空间.app/Contents/MacOS/WeChatStorage --layout-check build/LayoutChecks`。该入口只使用人工演示数据，覆盖完整窗口、导航、清理选择和完成提示，不连接真实微信。
 
-[验证记录](docs/validation.md) · [图标设计与生成提示词](docs/icon-design.md) · [发布说明](docs/releases/v0.3.0.md)
+[验证记录](docs/validation.md) · [图标设计与生成提示词](docs/icon-design.md) · [发布说明](docs/releases/v0.3.1.md)

@@ -76,6 +76,7 @@ enum MediaResolver {
 
     private static func zstd(_ data: Data) -> Data? {
         let candidates: [String?] = [Bundle.main.privateFrameworksURL.map { $0.appendingPathComponent("libzstd.dylib").path },
+                          SnapshotService.developmentDependencyRoot.appendingPathComponent("lib/libzstd.dylib").path,
                           "/opt/homebrew/opt/zstd/lib/libzstd.dylib", "/usr/local/opt/zstd/lib/libzstd.dylib", "/usr/lib/libzstd.dylib"]
         for path in candidates.compactMap({ $0 }) {
             guard let library = dlopen(path, RTLD_LOCAL | RTLD_LAZY) else { continue }

@@ -7,13 +7,13 @@ import plistlib
 import re
 import shutil
 import subprocess
-import sys
 from make_icon import build_icon
+from build_dependencies import main as build_dependencies, PREFIX as DEPENDENCIES
 
 PROJECT = Path(__file__).resolve().parents[1]
 OUTPUT = PROJECT / "build"
 BUNDLE = OUTPUT / "微空间.app"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 
 def run(*args, capture=False):
@@ -24,11 +24,14 @@ def run(*args, capture=False):
 
 def dependencies(binary):
     output = run("otool", "-L", str(binary), capture=True)
+    own_ids = set(run("otool", "-D", str(binary), capture=True).splitlines()[1:])
     return [line.strip().split(" (", 1)[0] for line in output.splitlines()[1:]
-            if line.strip().startswith(("/opt/homebrew/", "/usr/local/"))]
+            if line.strip().startswith((str(DEPENDENCIES), "/opt/homebrew/", "/usr/local/"))
+            and line.strip().split(" (", 1)[0] not in own_ids]
 
 
 def main():
+    build_dependencies()
     run("swift", "build", "-c", "release",
         "-Xswiftc", "-file-prefix-map", "-Xswiftc", str(PROJECT) + "=/WeChatStorage",
         "-Xswiftc", "-gnone")
@@ -48,7 +51,7 @@ def main():
         "CFBundleDevelopmentRegion": "zh_CN", "CFBundleExecutable": "WeChatStorage",
         "CFBundleIdentifier": "local.wechatstorage.app", "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleName": "微空间", "CFBundleDisplayName": "微空间", "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "8", "LSMinimumSystemVersion": "14.0",
+        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "9", "LSMinimumSystemVersion": "14.0",
         "CFBundleIconFile": "AppIcon.icns",
         "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
         "LSApplicationCategoryType": "public.app-category.utilities",
@@ -59,8 +62,7 @@ def main():
     shutil.copy2(PROJECT / "scripts" / "key_capture.py", resources / "key_capture.py")
     shutil.copy2(build_icon(OUTPUT), resources / "AppIcon.icns")
     bundled = []
-    packages = []
-    cipher = shutil.which("sqlcipher")
+    cipher = str(DEPENDENCIES / "bin/sqlcipher")
     copied = {}
 
     def copy_library(source):
@@ -89,35 +91,28 @@ def main():
             run("install_name_tool", "-change", dependency,
                 "@executable_path/../Frameworks/" + Path(dependency).name, str(target))
         bundled.append(target)
-        packages += [Path("/opt/homebrew/opt/sqlcipher"), Path("/opt/homebrew/opt/openssl@4"),
-                     Path("/opt/homebrew/opt/openssl@3"), Path("/usr/local/opt/sqlcipher")]
-    else:
-        print("SQLCipher not installed: the app can scan and preview, but cannot unlock encrypted indexes.", file=sys.stderr)
-    for library in [Path("/opt/homebrew/opt/zstd/lib/libzstd.dylib"), Path("/usr/local/opt/zstd/lib/libzstd.dylib")]:
-        if library.exists():
-            copy_library(library)
-            packages.append(library.parents[1])
-            break
+    copy_library(DEPENDENCIES / "lib/libzstd.dylib")
     notices = resources / "ThirdPartyNotices"
     notices.mkdir()
-    for package in packages:
-        if not package.exists():
-            continue
-        for path in package.rglob("*"):
-            if path.is_file() and path.name.upper().startswith(("LICENSE", "COPYING")) and path.stat().st_size < 200_000:
-                shutil.copy2(path, notices / (package.name + "-" + path.name))
+    for path in (DEPENDENCIES / "share/licenses").iterdir():
+        if path.is_file():
+            shutil.copy2(path, notices / path.name)
     (notices / "README.txt").write_text(
         "SQLCipher Community Edition (BSD-style license): https://github.com/sqlcipher/sqlcipher\n"
         "OpenSSL (Apache-2.0): https://www.openssl.org/source/license.html\n"
         "Zstandard (BSD/GPL dual license; BSD distribution): https://github.com/facebook/zstd\n"
         "The application uses Apple's system SQLite and frameworks.\n")
-    # The bundled Homebrew dependencies can require a newer OS than the Swift target.
-    # Advertise the highest actual Mach-O deployment floor instead of promising macOS 14.
+    # Enforce the requested floor on every shipped Mach-O, including bundled helpers.
     versions = [(14, 0)]
+    components = []
     for binary in [executable, *frameworks.iterdir(), *bundled]:
         version = re.search(r"\bminos\s+([0-9.]+)", run("xcrun", "vtool", "-show-build", str(binary), capture=True))
-        if version:
-            versions.append(tuple(int(part) for part in version.group(1).split(".")))
+        if not version:
+            raise RuntimeError("Cannot verify deployment target: " + str(binary))
+        versions.append(tuple(int(part) for part in version.group(1).split(".")))
+        components.append({"path": str(binary.relative_to(BUNDLE)), "minimumOSVersion": version.group(1)})
+    if max(versions) > (14, 0):
+        raise RuntimeError("A bundled binary exceeds the macOS 14 deployment target")
     minimum_os = ".".join(map(str, max(versions)))
     info["LSMinimumSystemVersion"] = minimum_os
     (contents / "Info.plist").write_bytes(plistlib.dumps(info))
@@ -138,6 +133,12 @@ def main():
     architecture = run("lipo", "-archs", str(executable), capture=True)
     release = OUTPUT / "release"
     release.mkdir(exist_ok=True)
+    compatibility = {"version": VERSION, "architecture": architecture, "minimumOSVersion": minimum_os,
+                     "components": components, "dependenciesBuiltFromSource": True, "opensslLinkage": "static",
+                     "runtimeValidationOS": run("sw_vers", "-productVersion", capture=True),
+                     "macOS14Or15HardwareTested": False, "notarized": False}
+    compatibility_file = release / "COMPATIBILITY.json"
+    compatibility_file.write_text(json.dumps(compatibility, indent=2) + "\n")
     artifact_name = f"WeChatStorage-{VERSION}-macOS-{architecture}"
     zip_release = release / (artifact_name + ".zip")
     shutil.copy2(archive, zip_release)
@@ -159,7 +160,7 @@ def main():
     run("hdiutil", "create", "-volname", "微空间", "-srcfolder", str(stage),
         "-format", "UDZO", "-fs", "HFS+", "-ov", str(dmg))
     checksums = []
-    for artifact in (dmg, zip_release):
+    for artifact in (dmg, zip_release, compatibility_file):
         digest = hashlib.sha256()
         with artifact.open("rb") as stream:
             while chunk := stream.read(1024 * 1024):
