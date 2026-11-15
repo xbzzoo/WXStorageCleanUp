@@ -26,6 +26,9 @@ public enum Scanner {
         let canonicalRoot = try FileSafety.canonicalPath(root)
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey,
             .isAliasFileKey, .isPackageKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .volumeIdentifierKey]
+        var parentPaths = [String: String]()
+        let keySet = Set(keys)
+        var lastProgress = ProcessInfo.processInfo.systemUptime
         let rootVolume = try root.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier.map { String(describing: $0) }
         let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys,
             options: [], errorHandler: { _, error in
@@ -36,7 +39,7 @@ public enum Scanner {
         for case let url as URL in enumerator {
             try Task.checkCancellation()
             do {
-                let values = try url.resourceValues(forKeys: Set(keys))
+                let values = try url.resourceValues(forKeys: keySet)
                 if values.isSymbolicLink == true || values.isAliasFile == true {
                     // DirectoryEnumerator does not descend into symlinks/aliases. Calling
                     // skipDescendants on a non-directory can skip unrelated pending entries.
@@ -54,7 +57,15 @@ public enum Scanner {
                     continue
                 }
                 guard values.isRegularFile == true else { continue }
-                let relative = try FileSafety.relativePath(url, root: root)
+                let parent = url.deletingLastPathComponent()
+                let resolvedParent: String
+                if let cached = parentPaths[parent.path] { resolvedParent = cached }
+                else { resolvedParent = try FileSafety.canonicalPath(parent); parentPaths[parent.path] = resolvedParent }
+                guard resolvedParent == canonicalRoot || resolvedParent.hasPrefix(canonicalRoot + "/") else {
+                    throw StorageError.invalid("扫描路径超出所选目录。")
+                }
+                let relative = resolvedParent == canonicalRoot ? url.lastPathComponent :
+                    String(resolvedParent.dropFirst(canonicalRoot.count + 1)) + "/" + url.lastPathComponent
                 let identity = try FileSafety.identity(url)
                 let account = accounts.first { $0.relativePath.isEmpty || relative.hasPrefix($0.relativePath + "/") }
                 let local = account.map { $0.relativePath.isEmpty ? relative : String(relative.dropFirst($0.relativePath.count + 1)) } ?? ""
@@ -70,7 +81,9 @@ public enum Scanner {
                     allocatedBytes: Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? Int(identity.bytes)),
                     category: category, accountID: account?.id, directoryChatHash: hash))
                 byteCount += identity.bytes
-                if files.count.isMultiple(of: 256) { progress(ScanProgress(count: files.count, bytes: byteCount)) }
+                if files.count.isMultiple(of: 256), ProcessInfo.processInfo.systemUptime - lastProgress >= 0.15 {
+                    progress(ScanProgress(count: files.count, bytes: byteCount)); lastProgress = ProcessInfo.processInfo.systemUptime
+                }
             } catch is CancellationError { throw CancellationError() }
             catch {
                 if warnings.count < 50 { warnings.append("部分项目读取失败，扫描结果不完整。") }

@@ -8,6 +8,55 @@ public struct AutomaticConnectionProgress: Sendable {
     public let total: Int
 }
 
+enum CaptureFeedback {
+    static func phase(_ event: CaptureEvent) -> String {
+        let verified = event.verified ?? 0, total = event.total ?? 0
+        if total > 0 && verified == total { return "已验证全部密钥，正在结束临时连接并建立索引…" }
+        let elapsed = event.elapsed.map { "已等待 \($0) 秒；" } ?? ""
+        let remaining = event.remaining.map { "本轮剩余约 \($0) 秒。" } ?? ""
+        let pending = event.pending?.prefix(4).joined(separator: "、") ?? ""
+        let hint = verified == 0
+            ? "请确认登录的是所选账号，并打开联系人、聊天图片和较早的历史消息。"
+            : "请继续打开联系人、聊天图片及较早的历史消息，以加载剩余索引。"
+        return "\(elapsed)已验证 \(verified)/\(total) 个加密索引。\(remaining)\n\(hint)" +
+            (pending.isEmpty ? "" : "\n等待：\(pending)")
+    }
+
+    static func failure(_ result: LocalCommandResult) -> String {
+        let event = result.events.last { ["error", "incomplete"].contains($0.event) }
+        switch event?.code {
+        case "debug_launch_denied":
+            return "无法启动调试连接窗口。请检查开发者工具权限及 Xcode / Command Line Tools 安装，并复制连接诊断以确认具体原因。"
+        case "unsupported_target_architecture":
+            return "当前微信程序架构不受支持；自动连接支持 arm64 和 x86_64。"
+        case "breakpoint_unavailable":
+            return "无法设置本地取钥观察点，当前开发工具或微信版本可能不兼容。请查看本地密钥与排查指引。"
+        case "breakpoint_unresolved":
+            return "当前开发工具未能解析微信取钥观察点，账号尚未连接。请复制连接诊断，检查 Command Line Tools 是否适配当前 macOS；打开更多聊天无法解决观察点未解析的问题。"
+        case "child_resume_failed":
+            return "调试组件未能恢复临时微信，账号尚未连接。请点击「复制连接诊断」提供调试状态和版本信息，以定位兼容问题。错误代码：child_resume_failed。"
+        case "debug_resume_denied":
+            return "系统在恢复临时微信时报告权限拒绝。请检查开发者工具权限，并点击「复制连接诊断」保留具体错误代码。"
+        default: break
+        }
+        let last = result.events.last { $0.verified != nil }
+        let verified = last?.verified ?? 0, total = last?.total ?? 0
+        let reason: String
+        switch event?.code {
+        case "child_crashed": reason = "临时微信意外中断。"
+        case "child_exited": reason = "临时微信在取齐密钥前退出。"
+        case "capture_failed": reason = "本地连接组件发生错误，账号尚未连接。请复制连接诊断。"
+        default: reason = "本轮等待已结束；微信登录成功后，还需要加载所选账号的数据库才能继续连接。"
+        }
+        let pending = last?.pending?.joined(separator: "、") ?? ""
+        let next = verified == 0
+            ? "请确认临时微信登录的是所选账号。若打开联系人和历史聊天后仍为 0，可能是微信版本或调试环境不兼容，可查看本地密钥与排查指引。"
+            : "已验证的密钥保存在本机。可再次自动连接，并打开联系人、聊天图片及较早的历史消息，继续补齐剩余密钥。"
+        return "\(reason)已验证 \(verified)/\(total) 个加密索引。\n\(next)" +
+            (pending.isEmpty ? "" : "\n尚缺：\(pending)")
+    }
+}
+
 public struct AutomaticConnectionResult: Sendable {
     public let inventory: Inventory
     public let index: AccountIndex
@@ -37,6 +86,24 @@ public struct AutomaticConnection: Sendable {
                   info["CFBundleIdentifier"] as? String == "com.tencent.xinWeChat" else { return false }
             return !url.path.contains("/WeChatStorage/KeyCapture/")
         }
+    }
+
+    // A re-signed, unsandboxed copy otherwise resolves Foundation's home to the
+    // login user's home, while the installed app uses its container's Data folder.
+    static func dataHome(databaseRoot: URL, fallback: URL = Scanner.defaultRoot) -> URL? {
+        var ancestor = databaseRoot.standardizedFileURL
+        while ancestor.path != "/" {
+            if ancestor.lastPathComponent == "Data",
+               ancestor.deletingLastPathComponent().lastPathComponent == "com.tencent.xinWeChat",
+               ancestor.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "Containers" {
+                return ancestor
+            }
+            ancestor.deleteLastPathComponent()
+        }
+        // A configured external storage location still uses preferences in the
+        // installed app's standard container, when that container exists.
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: fallback.path, isDirectory: &isDirectory) && isDirectory.boolValue ? fallback : nil
     }
 
     public func connect(account: Account, inventory: Inventory,
@@ -93,28 +160,32 @@ public struct AutomaticConnection: Sendable {
             _ = try LocalCommand.require("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", "--options", "0",
                 "--entitlements", entitlements.path, shadow.path], timeout: 120)
             let executable = shadow.appendingPathComponent("Contents/MacOS/" + executableName)
-            progress(.init(phase: "请在临时微信窗口进入所选账号，打开联系人及需要整理的聊天以加载索引。", verified: 0, total: names.count))
+            let homeArguments = Self.dataHome(databaseRoot: selectedStorage).map { ["--data-home", $0.path] } ?? []
+            progress(.init(phase: "请在临时微信窗口进入所选账号。登录后还需打开联系人、聊天图片和历史消息以加载索引；取齐后将自动继续。", verified: 0, total: names.count))
             var captureError: Error?
+            var verified = readiness.events.last?.verified ?? 0
+            var total = readiness.events.last?.total ?? names.count
             do {
-                let capture = try LocalCommand.run("/usr/bin/python3", baseArguments + ["--executable", executable.path, "--timeout", "240"],
+                let capture = try LocalCommand.run("/usr/bin/python3", baseArguments + ["--executable", executable.path, "--timeout", "240"] + homeArguments,
                     environment: environment, timeout: 270, event: { event in
                         if ["cache", "progress", "waiting", "launched"].contains(event.event) {
-                            progress(.init(phase: "正在连接所选账号；请在临时微信中打开联系人、聊天图片和历史聊天。",
+                            progress(.init(phase: CaptureFeedback.phase(event),
                                 verified: event.verified ?? 0, total: event.total ?? names.count))
                         }
                     })
+                try? store.saveDiagnostic(capture, root: inventory.root, accountID: account.id, application: application)
+                verified = capture.events.last(where: { $0.verified != nil })?.verified ?? verified
+                total = capture.events.last(where: { $0.total != nil })?.total ?? total
                 if capture.status != 0 {
-                    let code = capture.events.last(where: { $0.event == "error" })?.code
-                    if code == "debug_launch_denied" {
-                        throw StorageError.invalid("macOS 拒绝启动调试连接窗口，请检查开发者工具权限；工具不会关闭系统保护。")
-                    }
-                    throw StorageError.invalid("尚未获取所选账号的全部索引。已验证的部分会保留；下次可继续，请在临时微信切换到所选账号并打开聊天图片。")
+                    throw StorageError.invalid(CaptureFeedback.failure(capture))
                 }
             } catch { captureError = error }
             // Always close only our temporary app, including cancellation/error paths.
-            if !Self.closeTemporaryApplication(shadow) {
+            progress(.init(phase: "正在退出临时微信，已验证的本地密钥会保留…", verified: verified, total: total))
+            let exit = TemporaryApplicationCloser().close(shadow)
+            if exit != .closed {
                 keepSession = true
-                throw StorageError.invalid("临时微信仍在运行。请正常退出该临时窗口后重试；原版微信未被重签名。临时位置：\(shadow.path)")
+                throw StorageError.invalid(exit.failureMessage(application: shadow, captureError: captureError, verified: verified, total: total))
             }
             _ = try? LocalCommand.require("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
                 ["-u", shadow.path], ignoreCancellation: true)
@@ -153,30 +224,6 @@ public struct AutomaticConnection: Sendable {
         guard !WeChatProcess.isRunning() else { throw StorageError.invalid("微信尚未退出。请保存草稿并用 ⌘Q 正常退出后重试，不会强制结束原版微信。") }
     }
 
-    private static func closeTemporaryApplication(_ application: URL) -> Bool {
-        let prefix = application.path + "/"
-        for app in NSWorkspace.shared.runningApplications where app.executableURL?.path.hasPrefix(prefix) == true { _ = app.terminate() }
-        let end = Date().addingTimeInterval(15)
-        while Date() < end {
-            guard let pids = temporaryPIDs(prefix) else { return false }
-            if pids.isEmpty { return true }
-            Thread.sleep(forTimeInterval: 0.2)
-        }
-        return temporaryPIDs(prefix)?.isEmpty == true
-    }
-
-    private static func temporaryPIDs(_ prefix: String) -> [Int32]? {
-        let count = proc_listallpids(nil, 0)
-        guard count > 0 else { return nil }
-        var pids = [Int32](repeating: 0, count: Int(count) + 128)
-        let found = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<Int32>.stride))
-        guard found > 0, found <= pids.count else { return nil }
-        return pids.prefix(Int(found)).filter { pid in
-            guard pid > 0 else { return false }
-            var buffer = [CChar](repeating: 0, count: 4 * Int(PATH_MAX))
-            return proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 && String(cString: buffer).hasPrefix(prefix)
-        }
-    }
 }
 
 private struct CaptureRequest: Codable {

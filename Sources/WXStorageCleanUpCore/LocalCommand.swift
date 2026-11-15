@@ -1,13 +1,27 @@
 import Foundation
 import Darwin
 
-struct CaptureEvent: Decodable, Sendable {
+struct CaptureEvent: Codable, Sendable {
     let event: String
     let verified: Int?
     let total: Int?
     let complete: Bool?
     let pid: Int32?
     let code: String?
+    let pending: [String]?
+    let elapsed: Int?
+    let remaining: Int?
+    let observations: Int?
+    let lldbVersion: String?
+    let state: Int?
+    let stopID: Int?
+    let stopReasons: [Int]?
+    let errorType: Int?
+    let errorCode: Int?
+    let resumeKind: String?
+    let exitStatus: Int?
+    let breakpointLocations: Int?
+    let targetArchitecture: String?
 }
 
 struct LocalCommandResult: Sendable {

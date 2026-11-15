@@ -91,6 +91,79 @@ final class StorageTests: XCTestCase {
         XCTAssertEqual(IndexReader.imageResourceID(valid), identifier)
         XCTAssertNil(IndexReader.imageResourceID(valid + valid))
     }
+    func testLargeAccountAnalysisWithOneThousandChatsAndOneHundredThousandMessages() throws {
+        let (_, inventory, original, _) = try environment()
+        let chats = (0..<1000).map { number in
+            IndexedConversation(id: "bench-\(number)", accountID: original.accountID, internalID: "bench-\(number)", directoryHash: "", name: "人工聊天\(number)")
+        }
+        let messages = (0..<100000).map { number in
+            IndexedMessage(id: "benchmark-\(number)", conversationID: chats[number % 1000].id,
+                timestamp: Int64(number), localID: String(number), kind: .text,
+                summary: "人工性能数据", filePaths: [], resolution: "人工数据")
+        }
+        let index = AccountIndex(accountID: original.accountID, conversations: chats, messages: messages,
+            warnings: [], sourceFingerprint: original.sourceFingerprint, sourceRoot: original.sourceRoot,
+            sourceFiles: original.sourceFiles, trustedBinding: original.trustedBinding, loadedAt: Date())
+        let started = Date()
+        let analysis = Analysis(inventory: inventory, indexes: [index])
+        let grouped = Dictionary(grouping: analysis.messages, by: \.conversationID)
+        XCTAssertEqual(grouped.count, 1000)
+        XCTAssertEqual(grouped["bench-0"]?.count, 100)
+        XCTAssertEqual(analysis.messages.count, 100000)
+        print("PERFORMANCE artificial_chats=1000 messages=100000 analysis_and_group_seconds=\(Date().timeIntervalSince(started))")
+    }
+
+    func testConversationPreviewMatchesDirectorySizeWithoutMessageMapping() throws {
+        let (_, inventory, original, _) = try environment()
+        let directoryOnly = AccountIndex(accountID: original.accountID, conversations: original.conversations,
+            messages: [], warnings: [], sourceFingerprint: original.sourceFingerprint, sourceRoot: original.sourceRoot,
+            sourceFiles: original.sourceFiles, trustedBinding: true, loadedAt: Date())
+        let analysis = Analysis(inventory: inventory, indexes: [directoryOnly])
+        let chat = try XCTUnwrap(analysis.conversations.first { !$0.filePaths.isEmpty })
+        let plan = try CleanupPlanner.planConversation(analysis: analysis, conversationID: chat.id, accountID: original.accountID)
+        let expanded = Set(plan.candidates.flatMap { item in
+            item.isDirectory ? inventory.files.filter { $0.relativePath.hasPrefix(item.relativePath + "/") }.map(\.relativePath) : [item.relativePath]
+        })
+        XCTAssertEqual(expanded, chat.filePaths)
+        XCTAssertEqual(plan.candidates.filter(\.isDirectory).count, 1)
+        XCTAssertEqual(plan.logicalBytes, chat.logicalBytes)
+        XCTAssertTrue(plan.skipped.isEmpty)
+        XCTAssertEqual(plan.scope, .conversationAttachments)
+        XCTAssertThrowsError(try CleanupPlanner.planConversation(analysis: analysis, conversationID: chat.id, accountID: "other"))
+    }
+
+    func testConversationFolderTrashAndRestore() throws {
+        let (_, inventory, index, analysis) = try environment()
+        let chat = try XCTUnwrap(analysis.conversations.first { !$0.filePaths.isEmpty })
+        let plan = try CleanupPlanner.planConversation(analysis: analysis, conversationID: chat.id, accountID: index.accountID)
+        let directory = try XCTUnwrap(plan.candidates.first { $0.isDirectory })
+        let trash = try temporary()
+        let service = CleanupService(journalDirectory: try temporary())
+        let record = try service.execute(plan, processIsRunning: { false }, trash: { source in
+            let target = trash.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.moveItem(at: source, to: target)
+            return target
+        })
+        XCTAssertEqual(record.state, "completed")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: inventory.root.appendingPathComponent(directory.relativePath).path))
+        XCTAssertTrue(record.items.contains { $0.isDirectory == true })
+        let restored = try service.restore(record, processIsRunning: { false })
+        XCTAssertEqual(restored.restoredCount, record.trashedCount)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: inventory.root.appendingPathComponent(directory.relativePath).path))
+    }
+
+    func testExplicitSharedOptionExpandsOnlyMatchingPhysicalAttachments() throws {
+        let (_, inventory, index, analysis) = try environment()
+        let linked = try XCTUnwrap(inventory.files.first { $0.category == .attachment && $0.identity.links > 1 })
+        let message = try XCTUnwrap(index.messages.first { $0.filePaths.contains(linked.relativePath) })
+        let plan = try CleanupPlanner.plan(analysis: analysis, messageIDs: [message.id], allowedAccountID: index.accountID, includeOtherReferences: true)
+        let paths = Set(inventory.files.filter { $0.identity.physicalID == linked.identity.physicalID && $0.category == .attachment }.map(\.relativePath))
+        XCTAssertGreaterThan(paths.count, 1)
+        XCTAssertTrue(paths.isSubset(of: Set(plan.candidates.map(\.relativePath))))
+        XCTAssertTrue(plan.includesOtherReferences)
+        XCTAssertTrue(plan.candidates.allSatisfy { paths.contains($0.relativePath) })
+    }
+
     func testUnboundSnapshotOnlyAllowsPreview() throws {
         let (demo, inventory, _, _) = try environment()
         try FileManager.default.removeItem(at: demo.snapshot.appendingPathComponent("source-binding.json"))
@@ -124,11 +197,11 @@ final class StorageTests: XCTestCase {
         let both = try CleanupPlanner.plan(analysis: analysis, messageIDs: Set(shared.map(\.id)))
         XCTAssertEqual(both.candidates.count, 1)
     }
-    func testChatSelectionSkipsHardlinkedMedia() throws {
+    func testChatSelectionIncludesSelectedHardlinkedPaths() throws {
         let (_, _, index, analysis) = try environment()
         let plan = try CleanupPlanner.plan(analysis: analysis, conversationIDs: Set(index.conversations.map(\.id)))
-        XCTAssertEqual(plan.candidates.count, 12)
-        XCTAssertTrue(plan.skipped.contains { $0.contains("硬链接") })
+        XCTAssertEqual(plan.candidates.count, 14)
+        XCTAssertTrue(plan.candidates.contains { $0.expectedIdentity.links > 1 })
         XCTAssertTrue(plan.candidates.allSatisfy { $0.relativePath.contains("/msg/") && !$0.relativePath.contains("db_storage") })
     }
     func testExecutionAndRestoreRoundTrip() throws {

@@ -4,13 +4,34 @@ import Darwin
 
 /// Resolves only explicit message metadata, then verifies the bytes. A filename is never proof of ownership.
 enum MediaResolver {
+    final class Context {
+        var byName: [String: [StoredFile]] = [:]
+        var digests: [String: (FileIdentity, String)] = [:]
+        init(account: Account, inventory: Inventory) {
+            for file in inventory.files where file.accountID == account.id && file.category == .attachment {
+                let local = account.relativePath.isEmpty ? file.relativePath : String(file.relativePath.dropFirst(account.relativePath.count + 1))
+                if local.hasPrefix("msg/video/") {
+                    byName["video:" + (file.name as NSString).deletingPathExtension.lowercased(), default: []].append(file)
+                } else if local.hasPrefix("msg/file/") {
+                    byName["file:" + file.name, default: []].append(file)
+                    let stem = (file.name as NSString).deletingPathExtension
+                    let normalized = stem.replacingOccurrences(of: " ?\\([0-9]+\\)$", with: "", options: .regularExpression)
+                    if normalized != stem {
+                        let ext = (file.name as NSString).pathExtension
+                        byName["file:" + normalized + (ext.isEmpty ? "" : "." + ext), default: []].append(file)
+                    }
+                }
+            }
+        }
+    }
+
     static func body(_ data: Data?) -> String? {
         guard let data, data.count <= 16 * 1024 * 1024 else { return nil }
         if data.prefix(4) == Data([0x28, 0xb5, 0x2f, 0xfd]) { return zstd(data).flatMap { String(data: $0, encoding: .utf8) } }
         return String(data: data, encoding: .utf8)
     }
 
-    static func resolve(xml: String?, kind: MediaKind, account: Account, inventory: Inventory) throws -> (paths: [String], summary: String, reason: String) {
+    static func resolve(xml: String?, kind: MediaKind, account: Account, inventory: Inventory, context: Context? = nil) throws -> (paths: [String], summary: String, reason: String) {
         guard kind == .file || kind == .video else { return ([], "\(kind.rawValue)消息", "此消息类型未建立文件映射") }
         guard let xml, let start = xml.firstIndex(of: "<"), xml.utf8.count <= 16 * 1024 * 1024 else {
             return ([], "\(kind.rawValue)消息", "消息正文尚未解码，已保护")
@@ -36,26 +57,22 @@ enum MediaResolver {
             expected = metadata.videoMD5.lowercased(); title = "视频消息"; size = Int64(metadata.videoLength)
         }
         guard Scanner.isHash(expected) else { return ([], title, "消息缺少可靠的内容校验值，已保护") }
-        let candidates = inventory.files.filter { file in
-            guard file.accountID == account.id, file.category == .attachment,
-                  (size == nil || size == 0 || file.identity.bytes == size) else { return false }
-            let local = account.relativePath.isEmpty ? file.relativePath : String(file.relativePath.dropFirst(account.relativePath.count + 1))
-            if kind == .video {
-                return local.hasPrefix("msg/video/") && (file.name as NSString).deletingPathExtension.lowercased() == expected
-            }
-            guard local.hasPrefix("msg/file/") else { return false }
-            if file.name == title { return true }
-            let stem = (title as NSString).deletingPathExtension, ext = (title as NSString).pathExtension
-            let pattern = "^" + NSRegularExpression.escapedPattern(for: stem) + " ?\\([0-9]+\\)" +
-                (ext.isEmpty ? "" : "\\." + NSRegularExpression.escapedPattern(for: ext)) + "$"
-            return file.name.range(of: pattern, options: .regularExpression) != nil
+        let lookup = context ?? Context(account: account, inventory: inventory)
+        let candidates = (lookup.byName[(kind == .video ? "video:" + expected : "file:" + title)] ?? []).filter {
+            size == nil || size == 0 || $0.identity.bytes == size
         }
         var matched = [String]()
         for file in candidates {
             try Task.checkCancellation()
             let url = try FileSafety.checkedURL(relativePath: file.relativePath, root: inventory.root)
             guard try FileSafety.identity(url) == file.identity else { continue }
-            let digest = try md5(url)
+            let digest: String
+            if let cached = lookup.digests[file.identity.physicalID], cached.0 == file.identity {
+                digest = cached.1
+            } else {
+                digest = try md5(url)
+                lookup.digests[file.identity.physicalID] = (file.identity, digest)
+            }
             guard try FileSafety.identity(url) == file.identity else { continue }
             if digest == expected { matched.append(file.relativePath) }
         }

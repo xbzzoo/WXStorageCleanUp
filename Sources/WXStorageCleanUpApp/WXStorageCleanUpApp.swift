@@ -45,18 +45,22 @@ import WXStorageCleanUpCore
         }
     }
     var body: some Scene {
-        WindowGroup("WXStorageCleanUp") {
+        WindowGroup("微空间") {
             MainView().environmentObject(model).frame(minWidth: 1080, minHeight: 700)
                 .tint(Color.accentGreen)
         }
         .defaultSize(width: 1240, height: 800)
         .commands {
+            CommandGroup(replacing: .appTermination) {
+                Button("退出微空间") { NSApplication.shared.terminate(nil) }
+                    .keyboardShortcut("q").disabled(model.busy)
+            }
             CommandGroup(replacing: .newItem) {
-                Button("选择微信数据目录…") { model.pickRoot() }.keyboardShortcut("o")
+                Button("选择微信数据目录…") { model.pickRoot() }.keyboardShortcut("o").disabled(model.busy)
                 Button("连接聊天索引…") { model.showingConnection = true }
                     .disabled(model.inventory?.accounts.isEmpty != false || model.busy)
                 Button("重新扫描") { model.refresh() }.keyboardShortcut("r").disabled(model.busy || model.inventory == nil)
-                Button("导出空间分析…") { model.exportAnalysis() }.disabled(model.analysis == nil)
+                Button("导出空间分析…") { model.exportAnalysis() }.disabled(model.busy || model.analysis == nil)
             }
         }
     }

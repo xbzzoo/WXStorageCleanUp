@@ -7,6 +7,8 @@ public struct CleanupCandidate: Codable, Identifiable, Sendable {
     public let expectedIdentity: FileIdentity
     public let parentIdentity: DirectoryIdentity
     public let allocatedBytes: Int64
+    public var isDirectory = false
+    public var contentBytes: Int64? = nil
 }
 
 public struct DirectoryIdentity: Codable, Equatable, Sendable {
@@ -22,7 +24,7 @@ public struct DirectoryIdentity: Codable, Equatable, Sendable {
 }
 
 public enum CleanupScope: String, Codable, Sendable {
-    case messages, unassignedAttachments
+    case messages, unassignedAttachments, conversationAttachments
 }
 
 public struct CleanupPlan: Identifiable, Sendable {
@@ -35,24 +37,26 @@ public struct CleanupPlan: Identifiable, Sendable {
     public let accountIDs: [String]
     public let createdAt: Date
     public let scope: CleanupScope
-    public var logicalBytes: Int64 { candidates.reduce(0) { $0 + $1.expectedIdentity.bytes } }
+    public var conversationID: String? = nil
+    public var includesOtherReferences = false
+    public var logicalBytes: Int64 { candidates.reduce(0) { $0 + ($1.contentBytes ?? $1.expectedIdentity.bytes) } }
     public var allocatedBytes: Int64 {
         var seen = Set<String>()
         return candidates.reduce(0) { $0 + (seen.insert($1.expectedIdentity.physicalID).inserted ? $1.allocatedBytes : 0) }
     }
-    public var sharedPathCount: Int { candidates.filter { $0.expectedIdentity.links > 1 }.count }
+    public var sharedPathCount: Int { candidates.filter { !$0.isDirectory && $0.expectedIdentity.links > 1 }.count }
 }
 
 public enum CleanupPlanner {
     public static func plan(analysis: Analysis, conversationIDs: Set<String> = [], messageIDs: Set<String> = [],
-                            allowedAccountID: String? = nil) throws -> CleanupPlan {
+                            allowedAccountID: String? = nil, includeOtherReferences: Bool = false) throws -> CleanupPlan {
         guard analysis.inventory.complete else {
             throw StorageError.invalid("扫描存在未读取的目录，无法验证引用范围。请解决授权问题后重新扫描。")
         }
         let selected = analysis.messages.filter { conversationIDs.contains($0.conversationID) || messageIDs.contains($0.id) }
         let selectedIDs = Set(selected.map(\.id))
         guard !selected.isEmpty else { throw StorageError.invalid("请选择聊天或已建立附件映射的消息。") }
-        let wanted = Set(selected.flatMap(\.filePaths))
+        var wanted = Set(selected.flatMap(\.filePaths))
         let files = Dictionary(uniqueKeysWithValues: analysis.inventory.files.map { ($0.relativePath, $0) })
         let selectedChats = Set(selected.map(\.conversationID))
         let accountIDs = Set(analysis.conversations.filter { selectedChats.contains($0.id) }.map { $0.conversation.accountID })
@@ -67,6 +71,13 @@ public enum CleanupPlanner {
             guard index.trustedBinding else { throw StorageError.invalid("该账号的外部索引仅供预览，请先用本地密钥连接当前微信索引。") }
             sourceFiles.merge(index.sourceFiles) { first, _ in first }
         }
+        if includeOtherReferences {
+            let physicalIDs = Set(wanted.compactMap { files[$0]?.identity.physicalID })
+            for file in analysis.inventory.files where file.category == .attachment &&
+                file.accountID.map({ accountIDs.contains($0) }) == true && physicalIDs.contains(file.identity.physicalID) {
+                wanted.insert(file.relativePath)
+            }
+        }
         var candidates = [CleanupCandidate](), skipped = [String]()
         let unresolved = selected.filter { $0.kind != .text && $0.filePaths.isEmpty }.count
         if unresolved > 0 { skipped.append("\(unresolved) 条消息没有唯一的本地附件映射，已保护。") }
@@ -74,11 +85,8 @@ public enum CleanupPlanner {
             guard let file = files[path], file.category == .attachment else {
                 skipped.append("有项目不属于可处理的聊天附件范围。"); continue
             }
-            guard let refs = analysis.references[path], refs.isSubset(of: selectedIDs) else {
+            guard includeOtherReferences || (analysis.references[path]?.isSubset(of: selectedIDs) == true) else {
                 skipped.append("\(file.name)：还有未选中的消息引用，已保护。"); continue
-            }
-            guard file.identity.links == 1 else {
-                skipped.append("\(file.name)：存在硬链接共享，已保护。"); continue
             }
             let url = try FileSafety.checkedURL(relativePath: path, root: analysis.inventory.root)
             guard try FileSafety.identity(url) == file.identity else {
@@ -88,14 +96,65 @@ public enum CleanupPlanner {
                 parentIdentity: try DirectoryIdentity(url: url.deletingLastPathComponent()), allocatedBytes: file.allocatedBytes))
         }
         return CleanupPlan(id: UUID(), root: analysis.inventory.root, sourceFiles: sourceFiles,
-            candidates: candidates, skipped: skipped, selectedMessages: selected.count, accountIDs: accountIDs.sorted(), createdAt: Date(), scope: .messages)
+            candidates: candidates, skipped: skipped, selectedMessages: selected.count, accountIDs: accountIDs.sorted(), createdAt: Date(), scope: .messages, includesOtherReferences: includeOtherReferences)
+    }
+
+    /// The exact same paths and logical bytes displayed in ConversationUsage.
+    public static func planConversation(analysis: Analysis, conversationID: String, accountID: String) throws -> CleanupPlan {
+        guard analysis.inventory.complete, !analysis.inventory.blockedAccountIDs.contains(accountID) else {
+            throw StorageError.invalid("扫描范围不完整，请重新扫描后清理。")
+        }
+        guard let chat = analysis.conversations.first(where: { $0.id == conversationID && $0.conversation.accountID == accountID }) else {
+            throw StorageError.invalid("聊天不属于当前账号，请重新选择。")
+        }
+        var sources = [String: FileIdentity]()
+        for index in analysis.indexes where index.accountID == accountID {
+            guard index.trustedBinding else { throw StorageError.invalid("外部索引仅供预览，请先连接本地账号。") }
+            sources.merge(index.sourceFiles) { first, _ in first }
+        }
+        let files = Dictionary(uniqueKeysWithValues: analysis.inventory.files.map { ($0.relativePath, $0) })
+        var candidates = [CleanupCandidate]()
+        guard let account = analysis.inventory.accounts.first(where: { $0.id == accountID }) else { throw StorageError.invalid("当前账号不存在。") }
+        let base = account.relativePath.isEmpty ? "msg/attach/" : account.relativePath + "/msg/attach/"
+        var folder: String?
+        if Scanner.isHash(chat.conversation.directoryHash) {
+            let path = base + chat.conversation.directoryHash
+            if FileManager.default.fileExists(atPath: analysis.inventory.root.appendingPathComponent(path).path) {
+                let url = try FileSafety.checkedURL(relativePath: path, root: analysis.inventory.root)
+                let contained = analysis.inventory.files.filter { $0.relativePath.hasPrefix(path + "/") }
+                guard contained.allSatisfy({ $0.accountID == accountID && $0.category == .attachment }) else {
+                    throw StorageError.invalid("聊天目录包含范围外的数据，请重新扫描。")
+                }
+                candidates.append(CleanupCandidate(relativePath: path, expectedIdentity: try directoryFileIdentity(url),
+                    parentIdentity: try DirectoryIdentity(url: url.deletingLastPathComponent()),
+                    allocatedBytes: contained.reduce(0) { $0 + $1.allocatedBytes }, isDirectory: true,
+                    contentBytes: contained.reduce(0) { $0 + $1.identity.bytes }))
+                folder = path
+            }
+        }
+        for path in chat.filePaths.sorted() {
+            if let folder, path.hasPrefix(folder + "/") { continue }
+            try Task.checkCancellation()
+            guard let file = files[path], file.accountID == accountID, file.category == .attachment else {
+                throw StorageError.invalid("聊天附件范围不一致，请重新扫描。")
+            }
+            let url = try FileSafety.checkedURL(relativePath: path, root: analysis.inventory.root)
+            guard try FileSafety.identity(url) == file.identity else {
+                throw StorageError.invalid("附件已变化，请重新扫描后预览。")
+            }
+            candidates.append(CleanupCandidate(relativePath: path, expectedIdentity: file.identity,
+                parentIdentity: try DirectoryIdentity(url: url.deletingLastPathComponent()), allocatedBytes: file.allocatedBytes))
+        }
+        return CleanupPlan(id: UUID(), root: analysis.inventory.root, sourceFiles: sources,
+            candidates: candidates, skipped: [], selectedMessages: chat.messageCount, accountIDs: [accountID],
+            createdAt: Date(), scope: .conversationAttachments, conversationID: conversationID)
     }
 
     /// Explicit file selection, independent of message ownership. Unassigned is not proof of disuse.
     public static func planUnassigned(analysis: Analysis, relativePaths: Set<String>, accountID: String) throws -> CleanupPlan {
         guard analysis.inventory.complete else { throw StorageError.invalid("扫描存在未读取的目录，请解决授权问题后重新扫描。") }
         guard analysis.inventory.accounts.contains(where: { $0.id == accountID }), !relativePaths.isEmpty else {
-            throw StorageError.invalid("请选择当前账号的未归属附件。")
+            throw StorageError.invalid("请选择当前账号的其他文件。")
         }
         guard !analysis.inventory.blockedAccountIDs.contains(accountID) else {
             throw StorageError.invalid("所选账号内存在未扫描的目录链接，请解决后重新扫描。")
@@ -131,6 +190,7 @@ public struct JournalItem: Codable, Identifiable, Sendable {
     public var trashURL: String?
     public var state: String
     public var error: String?
+    public var isDirectory: Bool? = nil
 }
 
 public struct CleanupRecord: Codable, Identifiable, Sendable {
@@ -164,7 +224,7 @@ public struct CleanupService: Sendable {
         var record = CleanupRecord(id: plan.id, root: plan.root.path, createdAt: Date(),
             logicalBytes: plan.logicalBytes, state: "running", items: plan.candidates.map {
                 JournalItem(id: UUID(), sourceRelativePath: $0.relativePath,
-                    expectedIdentity: $0.expectedIdentity, trashURL: nil, state: "pending", error: nil)
+                    expectedIdentity: $0.expectedIdentity, trashURL: nil, state: "pending", error: nil, isDirectory: $0.isDirectory)
             }, notes: plan.skipped, accountIDs: plan.accountIDs, scope: plan.scope)
         try save(record)
         for index in plan.candidates.indices {
@@ -177,7 +237,7 @@ public struct CleanupService: Sendable {
             do {
                 try validateSource(plan)
                 let url = try FileSafety.checkedURL(relativePath: item.relativePath, root: plan.root)
-                guard try FileSafety.identity(url) == item.expectedIdentity,
+                guard try (item.isDirectory ? directoryFileIdentity(url) : FileSafety.identity(url)) == item.expectedIdentity,
                       try DirectoryIdentity(url: url.deletingLastPathComponent()) == item.parentIdentity else {
                     throw StorageError.invalid("文件或父目录已变化，已跳过。")
                 }
@@ -221,7 +281,7 @@ public struct CleanupService: Sendable {
             do {
                 guard let path = item.trashURL else { throw StorageError.invalid("未记录废纸篓实际位置。") }
                 let trashURL = URL(fileURLWithPath: path)
-                guard try FileSafety.identity(trashURL) == item.expectedIdentity else { throw StorageError.invalid("废纸篓项目已变化或不存在。") }
+                guard try (item.isDirectory == true ? directoryFileIdentity(trashURL) : FileSafety.identity(trashURL)) == item.expectedIdentity else { throw StorageError.invalid("废纸篓项目已变化或不存在。") }
                 let source = root.appendingPathComponent(item.sourceRelativePath)
                 let parent = (item.sourceRelativePath as NSString).deletingLastPathComponent
                 if !parent.isEmpty { _ = try FileSafety.checkedURL(relativePath: parent, root: root) }
@@ -269,4 +329,13 @@ public struct CleanupService: Sendable {
         guard let result else { throw StorageError.invalid("系统未返回废纸篓位置，需人工核查。") }
         return result as URL
     }
+}
+
+private func directoryFileIdentity(_ url: URL) throws -> FileIdentity {
+    var metadata = stat()
+    guard lstat(url.path, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR else {
+        throw StorageError.invalid("聊天文件夹已变化或不是普通目录。")
+    }
+    return FileIdentity(device: UInt64(metadata.st_dev), inode: UInt64(metadata.st_ino), bytes: Int64(metadata.st_size),
+        modifiedSeconds: Int64(metadata.st_mtimespec.tv_sec), modifiedNanos: Int64(metadata.st_mtimespec.tv_nsec), links: UInt64(metadata.st_nlink))
 }

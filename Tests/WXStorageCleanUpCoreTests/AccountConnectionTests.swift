@@ -79,4 +79,59 @@ final class AccountConnectionTests: XCTestCase {
         do { _ = try await task.value; XCTFail("Cancellation must propagate") }
         catch is CancellationError {}
     }
+
+    func testTemporaryLaunchPreservesContainerHomeForAllScanEntryPoints() throws {
+        let home = temporary.appendingPathComponent("Library/Containers/com.tencent.xinWeChat/Data")
+        for relative in ["Documents/xwechat_files/a/db_storage", "Documents/xwechat_files/b/db_storage"] {
+            XCTAssertEqual(AutomaticConnection.dataHome(databaseRoot: home.appendingPathComponent(relative))?.path, home.path)
+        }
+        let external = temporary.appendingPathComponent("external/xwechat_files/a/db_storage")
+        let fallback = temporary.appendingPathComponent("original-container")
+        XCTAssertNil(AutomaticConnection.dataHome(databaseRoot: external, fallback: fallback))
+        try FileSafety.privateDirectory(fallback)
+        XCTAssertEqual(AutomaticConnection.dataHome(databaseRoot: external, fallback: fallback), fallback)
+    }
+
+    func testCaptureFeedbackExplainsWaitingAndPartialOrZeroKeyFailure() throws {
+        func event(_ json: String) throws -> CaptureEvent { try JSONDecoder().decode(CaptureEvent.self, from: Data(json.utf8)) }
+        let waiting = try event(#"{"event":"waiting","verified":1,"total":2,"pending":["message/message_0.db"],"elapsed":30,"remaining":210}"#)
+        let phase = CaptureFeedback.phase(waiting)
+        XCTAssertTrue(phase.contains("30 秒"))
+        XCTAssertTrue(phase.contains("210 秒"))
+        XCTAssertTrue(phase.contains("message/message_0.db"))
+        let partial = LocalCommandResult(status: 3, output: Data(), events: [waiting,
+            try event(#"{"event":"incomplete","code":"capture_timeout","verified":1,"total":2,"pending":["message/message_0.db"]}"#)])
+        XCTAssertTrue(CaptureFeedback.failure(partial).contains("已验证的密钥保存在本机"))
+        XCTAssertTrue(CaptureFeedback.failure(partial).contains("message/message_0.db"))
+        let zero = LocalCommandResult(status: 3, output: Data(), events: [
+            try event(#"{"event":"incomplete","code":"child_exited","verified":0,"total":2}"#)])
+        XCTAssertTrue(CaptureFeedback.failure(zero).contains("取齐密钥前退出"))
+        XCTAssertTrue(CaptureFeedback.failure(zero).contains("版本或调试环境不兼容"))
+        let denied = LocalCommandResult(status: 2, output: Data(), events: [
+            try event(#"{"event":"error","code":"debug_launch_denied"}"#)])
+        XCTAssertTrue(CaptureFeedback.failure(denied).contains("开发者工具权限"))
+        let resumed = LocalCommandResult(status: 2, output: Data(), events: [
+            try event(#"{"event":"error","code":"child_resume_failed","state":5,"errorType":1,"errorCode":7}"#)])
+        XCTAssertTrue(CaptureFeedback.failure(resumed).contains("复制连接诊断"))
+        XCTAssertFalse(CaptureFeedback.failure(resumed).contains("开发者工具权限"))
+    }
+
+    func testConnectionDiagnosticIsPrivateScopedAndExcludesRawOutput() throws {
+        let store = AccountConnectionStore(directory: temporary.appendingPathComponent("connections"))
+        let metadata = try JSONDecoder().decode(CaptureEvent.self, from: Data(
+            #"{"event":"error","code":"child_resume_failed","state":5,"errorCode":7,"resumeKind":"other"}"#.utf8))
+        let debugger = try JSONDecoder().decode(CaptureEvent.self, from: Data(
+            #"{"event":"debugger","lldbVersion":"lldb-1403"}"#.utf8))
+        let output = LocalCommandResult(status: 2, output: Data("private-key-and-chat-text".utf8), events: [debugger, metadata])
+        try store.saveDiagnostic(output, root: temporary, accountID: "a", application: temporary.appendingPathComponent("fixture.app"))
+        let text = try store.diagnosticText(root: temporary, accountID: "a")
+        XCTAssertTrue(text.contains("lldb-1403"))
+        XCTAssertTrue(text.contains("child_resume_failed"))
+        XCTAssertFalse(text.contains("private-key-and-chat-text"))
+        XCTAssertFalse(text.contains(temporary.path))
+        XCTAssertThrowsError(try store.diagnosticText(root: temporary, accountID: "b"))
+        let file = store.accountDirectory(root: temporary, accountID: "a").appendingPathComponent("last-connection-diagnostic.json")
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
 }

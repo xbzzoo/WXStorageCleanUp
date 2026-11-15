@@ -130,6 +130,7 @@ public enum IndexReader {
                 kind: kind, summary: "\(kind.rawValue)消息", filePaths: paths, resolution: resolution))
         }
         // Include conversations with no media resources, and text-only messages, when message shards are supplied.
+        let resolverContext = MediaResolver.Context(account: account, inventory: inventory)
         let messageFolder = base.appendingPathComponent("message")
         let shards = (try? FileManager.default.contentsOfDirectory(at: messageFolder, includingPropertiesForKeys: nil)) ?? []
         var seenShardKeys = Set<String>()
@@ -165,7 +166,7 @@ public enum IndexReader {
                     }
                     if existingIndices.count > 1 { continue }
                     if kind == .image, !existingIndices.isEmpty { continue }
-                    let resolved = try MediaResolver.resolve(xml: raw, kind: kind, account: account, inventory: inventory)
+                    let resolved = try MediaResolver.resolve(xml: raw, kind: kind, account: account, inventory: inventory, context: resolverContext)
                     let summary = kind == .text ? String((raw ?? "文字消息（正文未解码）").prefix(120)) : resolved.summary
                     if let index = existingIndices.first {
                         if messages[index].kind == kind {

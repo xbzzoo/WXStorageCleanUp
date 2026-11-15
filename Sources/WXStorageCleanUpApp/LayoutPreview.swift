@@ -20,7 +20,16 @@ private final class LayoutCheckWindow: NSWindow {
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
         application.finishLaunching()
+        let imageFixture = output.appendingPathComponent("preview-image.png")
+        if let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 48, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) {
+            for x in 0..<64 { for y in 0..<48 { bitmap.setColor(NSColor(deviceRed: 0.0, green: 0.6, blue: 0.7, alpha: 1), atX: x, y: y) } }
+            if let bytes = bitmap.representation(using: .png, properties: [:]) { try bytes.write(to: imageFixture) }
+        }
         let cases: [(String, CGFloat, CGFloat, Bool, Bool, String)] = [
+            ("image-gallery-900", 900, 650, true, false, ""),
+            ("loading-titled-1080", 1080, 700, true, true, ""),
+            ("loading-connection-640", 640, 660, true, false, ""),
             ("welcome-1080", 1080, 700, false, false, ""),
             ("initial-1080", 1080, 700, true, false, ""),
             ("initial-1240", 1240, 800, true, false, ""),
@@ -72,9 +81,14 @@ private final class LayoutCheckWindow: NSWindow {
             if name.hasPrefix("welcome") {
                 model.inventory = nil; model.analysis = nil; model.isDemo = false; model.notice = nil; model.page = .overview
             }
+            if name.hasPrefix("loading") {
+                model.busy = true
+                model.status = "正在扫描本机微信并建立账号索引，请稍候…"
+            }
             // Include the actual application shell: navigation, header, banners and footer.
             let contentWidth = width, contentHeight = height
-            let view = MainView().environmentObject(model).tint(Color.accentGreen)
+            let surface = name == "image-gallery-900" ? AnyView(ChatImagesView(root: output, paths: ["preview-image.png"])) : name == "loading-connection-640" ? AnyView(ConnectionView()) : AnyView(MainView())
+            let view = surface.environmentObject(model).tint(Color.accentGreen)
                 .frame(width: contentWidth, height: contentHeight)
                 .background(Color.canvas)
             let hosting = NSHostingView(rootView: view)
@@ -89,6 +103,7 @@ private final class LayoutCheckWindow: NSWindow {
             if name == "after-cleanup-next-1080" {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.2))
                 model.previewCurrentConversation()
+                try waitUntilIdle(model)
                 guard model.plan?.candidates.isEmpty == false else { throw StorageError.invalid("演示聊天没有生成清理计划。") }
                 RunLoop.main.run(until: Date().addingTimeInterval(0.4))
                 let trash = output.appendingPathComponent("fixture-trash")
@@ -124,6 +139,7 @@ private final class LayoutCheckWindow: NSWindow {
                 try click(NSPoint(x: 260, y: height - 324), in: window)
                 guard model.checkedUnassigned.contains(shared.id) else { throw StorageError.invalid("共享附件无法从界面勾选。") }
                 model.previewUnassigned()
+                try waitUntilIdle(model)
                 guard model.plan?.candidates.count == 1, model.plan?.sharedPathCount == 1 else {
                     throw StorageError.invalid("共享附件未进入清理计划。")
                 }
@@ -133,8 +149,6 @@ private final class LayoutCheckWindow: NSWindow {
                 let first = model.visibleConversations[0].id
                 try click(NSPoint(x: 365, y: height - 292), in: window)
                 guard model.selectedConversation == first else { throw StorageError.invalid("聊天行点击未生效。") }
-                try click(NSPoint(x: 222, y: height - 292), in: window)
-                guard model.checkedConversations.contains(first) else { throw StorageError.invalid("聊天复选框点击未生效。") }
             }
             hosting.layoutSubtreeIfNeeded()
             guard abs(hosting.bounds.width - contentWidth) < 1, abs(hosting.bounds.height - contentHeight) < 1 else {
@@ -154,7 +168,21 @@ private final class LayoutCheckWindow: NSWindow {
                 try click(NSPoint(x: 100, y: height - 160), in: window)
                 guard model.page == .chats else { throw StorageError.invalid("侧栏无法切换到聊天。") }
                 try click(NSPoint(x: 100, y: height - 205), in: window)
-                guard model.page == .unassigned else { throw StorageError.invalid("侧栏无法切换到未归属附件。") }
+                guard model.page == .unassigned else { throw StorageError.invalid("侧栏无法切换到其他文件。") }
+            }
+            if name == "loading-titled-1080" {
+                guard window.standardWindowButton(.closeButton)?.isEnabled == false else {
+                    throw StorageError.invalid("加载时窗口关闭按钮未锁定。")
+                }
+                try click(NSPoint(x: 100, y: height - 115), in: window)
+                guard model.page == .chats else { throw StorageError.invalid("加载时仍可切换侧栏。") }
+                model.busy = false
+                RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+                guard window.standardWindowButton(.closeButton)?.isEnabled == true else {
+                    throw StorageError.invalid("加载完成后窗口关闭按钮未恢复。")
+                }
+                try click(NSPoint(x: 100, y: height - 115), in: window)
+                guard model.page == .overview else { throw StorageError.invalid("加载完成后侧栏未恢复。") }
             }
             results.append(["case": name, "width": width, "height": height,
                 "fullWindow": true, "navigationInteractionChecked": name.hasPrefix("navigation"), "returnShown": isUnassigned,

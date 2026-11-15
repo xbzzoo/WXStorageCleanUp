@@ -10,7 +10,7 @@ struct MainView: View {
                 HStack(spacing: 11) {
                     AppBrandIcon(size: 40)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("WXStorageCleanUp").font(.system(size: 14, weight: .semibold))
+                        Text("微空间").font(.system(size: 14, weight: .semibold))
                             .lineLimit(1).minimumScaleFactor(0.75)
                         Text("微信存储管理").font(.caption).foregroundStyle(.secondary)
                     }
@@ -63,6 +63,7 @@ struct MainView: View {
             }.frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity).background(Color.canvas)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .modifier(GlobalLoading())
         .sheet(isPresented: $model.showingConnection) { ConnectionView() }
         .sheet(item: $model.plan) { plan in PlanView(plan: plan) }
         .alert("操作未完成", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
@@ -116,13 +117,14 @@ struct MainView: View {
                 .disabled(model.analysis == nil)
             Button { model.refresh() } label: { Label("重新扫描", systemImage: "arrow.clockwise") }
                 .disabled(model.busy || model.inventory == nil)
+            Text("微空间").font(.caption.weight(.semibold)).foregroundStyle(Color.accentGreen).fixedSize()
         }
       }.padding(26).frame(maxWidth: .infinity, alignment: .leading).accessibilityIdentifier("page-header")
     }
     private var subtitle: String {
         switch model.page {
         case .overview: "看清空间去向，再决定整理哪些内容"
-        case .chats: "按聊天归集附件，也可以进入聊天选择具体消息"
+        case .chats: "按聊天查看和清理全部本地附件，也可打开 Finder 文件夹"
         case .unassigned: "查看尚未识别聊天归属的本地附件，按文件选择整理"
         case .history: "查看移入废纸篓的项目，恢复仍可找回的附件"
         }
@@ -206,18 +208,18 @@ struct OverviewView: View {
                         MetricCard(title: "微信占用估算", value: SizeText.format(inventory.allocatedBytes + inventory.applicationAllocatedBytes),
                             note: "扫描范围内数据 + 检测到的应用本体；APFS 共享块可能影响数值", icon: "internaldrive")
                         MetricCard(title: "聊天附件", value: SizeText.format(inventory.files.filter { $0.category == .attachment }.reduce(0) { $0 + $1.identity.bytes }),
-                            note: "逻辑大小 · 图片、视频、文件等，包含尚未归属的附件", icon: "photo.on.rectangle")
+                            note: "逻辑大小 · 图片、视频、文件等，包含尚未匹配到聊天的附件", icon: "photo.on.rectangle")
                         MetricCard(title: "会话目录", value: "\(analysis.conversations.count)",
                             note: "\(analysis.conversations.filter { $0.conversation.named }.count) 个已识别名称，\(analysis.messages.count) 条索引消息", icon: "bubble.left.and.bubble.right")
                     }
                     HStack {
                         VStack(alignment: .leading, spacing: 7) {
-                            Text("当前账号未归属附件 · \(SizeText.format(model.accountUnassigned.reduce(0) { $0 + $1.identity.bytes }))").font(.headline)
+                            Text("当前账号其他文件 · \(SizeText.format(model.accountUnassigned.reduce(0) { $0 + $1.identity.bytes }))").font(.headline)
                             Text("\(model.accountUnassigned.count) 个文件尚未归集到聊天。可查看位置并按文件选择清理。")
                                 .font(.callout).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("查看未归属附件") { model.page = .unassigned }.buttonStyle(.bordered)
+                        Button("查看其他文件") { model.page = .unassigned }.buttonStyle(.bordered)
                     }.padding(22).background(Color.card, in: RoundedRectangle(cornerRadius: 14))
                     VStack(alignment: .leading, spacing: 18) {
                         HStack { Text("空间分布").font(.headline); Spacer(); Text("按路径逻辑大小").font(.caption).foregroundStyle(.secondary) }
@@ -242,7 +244,7 @@ struct OverviewView: View {
                     }.padding(23).background(Color.card, in: RoundedRectangle(cornerRadius: 14))
                     HStack(alignment: .top, spacing: 14) {
                         MetricCard(title: "未分配到具体聊天", value: SizeText.format(analysis.unattributedBytes),
-                            note: "包括数据库、应用公共数据和未归属附件，不按聊天均摊", icon: "tray")
+                            note: "包括数据库、应用公共数据和其他文件，不按聊天均摊", icon: "tray")
                         MetricCard(title: "应用本体", value: SizeText.format(inventory.applicationBytes),
                             note: inventory.applicationScanComplete ? "逻辑大小 · 不参与附件清理" : "应用扫描不完整", icon: "app.badge")
                     }
@@ -327,8 +329,6 @@ struct ChatsView: View {
                 TextField("搜索聊天名或标识", text: $model.search).textFieldStyle(.plain)
             }.padding(12).background(Color.card, in: RoundedRectangle(cornerRadius: 8)).padding(14)
             HStack {
-                Button("选择当前结果") { model.checkedConversations = Set(model.visibleConversations.filter { $0.conversation.named }.map(\.id)) }
-                    .buttonStyle(.link)
                 Spacer()
                 Text("按附件大小排序").font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }.padding(.horizontal, 15).padding(.bottom, 8)
@@ -336,9 +336,7 @@ struct ChatsView: View {
               ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(model.visibleConversations) { usage in
-                        ConversationListRow(usage: usage, checked: Binding(get: { model.checkedConversations.contains(usage.id) }, set: {
-                                if $0 { model.checkedConversations.insert(usage.id) } else { model.checkedConversations.remove(usage.id) }
-                            }), onSelect: { model.selectedConversation = usage.id; listIsFocused = true })
+                        ConversationListRow(usage: usage, onSelect: { model.selectedConversation = usage.id; listIsFocused = true })
                             .padding(.horizontal, 12).padding(.vertical, 6)
                             .background(model.selectedConversation == usage.id ? Color.accentGreen.opacity(0.06) : Color.clear)
                             .contentShape(Rectangle())
@@ -373,12 +371,6 @@ struct ChatsView: View {
                 }
             }
             Divider()
-            HStack {
-                Text("已选 \(model.checkedConversations.count) 个聊天").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Spacer()
-                Button("预览清理") { model.preview(conversations: true) }
-                    .disabled(model.checkedConversations.isEmpty || model.busy)
-            }.padding(14)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -386,16 +378,12 @@ struct ChatsView: View {
 
 private struct ConversationListRow: View {
     let usage: ConversationUsage
-    @Binding var checked: Bool
     let onSelect: () -> Void
     private var subtitle: String {
         usage.conversation.named ? "\(usage.filePaths.count) 个附件 · \(usage.messageCount) 条索引消息" : "未连接名称索引 · 仅目录归集"
     }
     var body: some View {
         HStack(spacing: 9) {
-            Toggle("选择聊天", isOn: $checked)
-                .toggleStyle(.checkbox).controlSize(.small).labelsHidden()
-                .frame(width: 18).disabled(!usage.conversation.named)
             Button(action: onSelect) {
                 HStack(spacing: 9) {
                     Image(systemName: usage.conversation.isGroup ? "person.2.fill" : "bubble.left.fill")
@@ -422,6 +410,7 @@ private struct ConversationListRow: View {
 
 struct ConversationDetailView: View {
     @EnvironmentObject var model: AppModel
+    @State private var showingImages = false
     var body: some View {
         if let usage = model.currentConversation {
             ScrollView {
@@ -435,8 +424,13 @@ struct ConversationDetailView: View {
                         stat("独占分配估算", SizeText.format(usage.allocatedBytes))
                         stat("共享分配估算", SizeText.format(usage.sharedBytes))
                     }
-                    Text("已精确定位 \(usage.indexedFilePaths.count)/\(usage.filePaths.count) 个附件。数据库、语音及未归属文件未计入此聊天；这里不是完整聊天数据总量。")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text("\(usage.filePaths.count) 个本地附件，清理预览与上方附件逻辑大小使用相同清单。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("查看聊天图片") { showingImages = true }
+                    Button("在 Finder 中打开聊天附件文件夹") { model.openCurrentConversationFolder() }
+                        .buttonStyle(.link)
+                    Text("文件与视频可能分散存放在其他目录，清理预览会列出全部附件路径。")
+                        .font(.caption).foregroundStyle(.secondary)
                     if !usage.conversation.named {
                         Button("连接索引以显示聊天名和消息") { model.showingConnection = true }
                     }
@@ -453,17 +447,14 @@ struct ConversationDetailView: View {
                     Toggle("截至日期", isOn: $model.useDateFilter).toggleStyle(.checkbox)
                     DatePicker("日期", selection: $model.beforeDate, displayedComponents: .date).labelsHidden().disabled(!model.useDateFilter)
                     Spacer()
-                    Button("选择当前附件") { model.checkedMessages = Set(model.visibleMessages.filter { !$0.filePaths.isEmpty }.map(\.id)) }.buttonStyle(.link)
                 }.font(.caption).padding(.horizontal, 18).padding(.vertical, 12)
+                if model.analysisLoading { ProgressView("正在整理聊天索引…").padding() }
                 if model.visibleMessages.isEmpty {
                     ContentUnavailableView("暂无可显示的消息", systemImage: "text.bubble", description: Text("连接索引后显示消息。筛选条件下没有结果时，可调整类型或日期。"))
                 } else {
                     LazyVStack(spacing: 0) {
                       ForEach(model.visibleMessages) { message in
                         HStack(alignment: .top, spacing: 11) {
-                            Toggle("选择消息", isOn: Binding(get: { model.checkedMessages.contains(message.id) }, set: {
-                                if $0 { model.checkedMessages.insert(message.id) } else { model.checkedMessages.remove(message.id) }
-                            })).toggleStyle(.checkbox).labelsHidden().disabled(message.filePaths.isEmpty)
                             VStack(alignment: .leading, spacing: 7) {
                                 HStack {
                                     Text(message.kind.rawValue).font(.caption.weight(.medium)).foregroundStyle(Color.accentGreen)
@@ -473,6 +464,9 @@ struct ConversationDetailView: View {
                                 }
                                 Text(message.summary).font(.callout).lineLimit(2)
                                 Text(message.resolution).font(.caption).foregroundStyle(.secondary)
+                                if message.kind == .image, let root = model.inventory?.root, let path = message.filePaths.first {
+                                    ChatImageView(root: root, path: path)
+                                }
                                 ForEach(message.filePaths, id: \.self) { path in
                                     Button { model.reveal(path) } label: { Label((path as NSString).lastPathComponent, systemImage: "folder") }
                                         .buttonStyle(.link).font(.caption).lineLimit(1)
@@ -483,26 +477,30 @@ struct ConversationDetailView: View {
                       }
                     }
                 }
+                if model.visibleMessages.count < model.filteredMessageCache.count {
+                    Button("加载更多消息（每次 200 条）") { model.messageLimit += 200 }.padding()
+                }
               }.frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .sheet(isPresented: $showingImages) {
+                if let root = model.inventory?.root { ChatImagesView(root: root, paths: usage.filePaths) }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(alignment: .leading, spacing: 0) {
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("已选 \(model.checkedMessages.count) 条消息的附件").font(.caption).foregroundStyle(.secondary)
+                        Text("清理该聊天的全部 \(usage.filePaths.count) 个本地附件；消息筛选不改变清理范围。").font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Button("清理此聊天…") { model.previewCurrentConversation() }
                                 .disabled(!model.canCleanCurrentConversation)
                             Spacer(minLength: 8)
-                            Button("预览所选消息") { model.preview(conversations: false) }.buttonStyle(.borderedProminent)
-                                .disabled(model.checkedMessages.isEmpty || model.busy)
                         }
                     }.padding(18)
                 }.background(Color.canvas)
             }
         } else {
-            ContentUnavailableView("选择一个聊天", systemImage: "bubble.left.and.bubble.right", description: Text("查看附件占用，或进入聊天选择具体消息。"))
+            ContentUnavailableView("选择一个聊天", systemImage: "bubble.left.and.bubble.right", description: Text("查看该聊天的附件占用、清理全部附件或打开 Finder。"))
         }
     }
     private func stat(_ label: String, _ value: String) -> some View {
@@ -542,11 +540,39 @@ struct ConnectionView: View {
                                 ProgressView(value: Double(model.captureVerified), total: Double(model.captureTotal))
                                 Text("已验证 \(model.captureVerified)/\(model.captureTotal) 个加密索引").font(.caption).foregroundStyle(.secondary)
                             }
+                            if model.connectionStatus[model.selectedAccount] == "连接中" {
+                                Text(model.status).font(.callout).textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                             Text("密钥仅保存在本机私有目录。首次可能需要手机确认、macOS 开发工具授权或打开聊天以加载所需索引。")
                                 .font(.caption).foregroundStyle(.secondary)
                             Button("忘记所选账号的自动连接…", role: .destructive) { confirmForget = true }
                                 .disabled(model.busy || model.isDemo || model.selectedAccount.isEmpty)
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                    }
+                    if let error = model.errorMessage {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label { Text(error).textSelection(.enabled) } icon: { Image(systemName: "exclamationmark.triangle") }
+                                .font(.callout).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                            Button("复制连接诊断") { model.copyConnectionDiagnostics() }.disabled(model.busy || model.isDemo)
+                            Text("诊断包含版本、数量和调试状态，不含密钥或聊天内容。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    DisclosureGroup("登录后未继续连接 / 获取本地密钥指引") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("1. 临时微信中登录的账号须与上方所选账号一致。手机确认后，请打开联系人、包含图片的聊天及较早的历史消息。")
+                            Text("2. 留意已验证数量和等待中的数据库。全部验证后会自动退出临时微信并继续连接；本轮最多等待约 4 分钟，部分有效密钥会保留，可重试补齐。")
+                            Text("3. 若一直为 0，检查开发者工具授权；也可能是当前微信版本不兼容。可打开完整指引，使用终端查看连接进度和失败原因。")
+                            Text("4. 已获取的 keys.json 可在下方定位，再通过「高级：手动导入」连接。部分密钥不保证足够连接；从其他来源获取时，须是本机所选账号的数据库密钥。")
+                            HStack {
+                                Button("定位所选账号的本地密钥…") { model.revealSelectedKeys() }
+                                    .disabled(model.busy || model.isDemo || model.selectedAccount.isEmpty)
+                                Button("打开完整操作指引") { model.openConnectionGuide() }
+                                Button("复制连接诊断") { model.copyConnectionDiagnostics() }
+                                    .disabled(model.busy || model.isDemo || model.selectedAccount.isEmpty)
+                            }
+                        }.font(.callout).foregroundStyle(.secondary).padding(.top, 12)
                     }
                     DisclosureGroup("高级：手动导入") {
                         VStack(alignment: .leading, spacing: 14) {
@@ -554,7 +580,7 @@ struct ConnectionView: View {
                                 .font(.callout).foregroundStyle(.secondary)
                             Button("选择本地密钥并连接…") { model.importKeys() }.disabled(model.busy)
                             Button("导入已解密索引…") { model.importSnapshot() }.disabled(model.busy)
-                            Text("SQLCipher：\(SnapshotService.sqlcipherURL() == nil ? "未检测到" : "已检测到") · 自动取钥需要 Apple Silicon 与 Xcode 开发工具")
+                            Text("SQLCipher：\(SnapshotService.sqlcipherURL() == nil ? "未检测到" : "已检测到") · 自动取钥支持 Apple Silicon / Intel，需要 Xcode 或 Command Line Tools")
                                 .font(.caption).foregroundStyle(.secondary)
                         }.padding(.top, 12)
                     }
@@ -568,9 +594,11 @@ struct ConnectionView: View {
                 }
             }
             if model.busy {
-                HStack { ProgressView().controlSize(.small); Text(model.status).font(.caption); Spacer(); Button("取消") { model.cancel() } }
+                HStack { ProgressView().controlSize(.small); Text("正在执行连接步骤…").font(.caption); Spacer(); Button("取消") { model.cancel() } }
             }
         }.padding(28).frame(width: 640, height: 660)
+        .modifier(GlobalLoading())
+        .interactiveDismissDisabled(model.busy)
         .confirmationDialog("清除本工具创建的明文索引快照？", isPresented: $confirmErase) {
             Button("清除快照", role: .destructive) { model.eraseSnapshots() }
         } message: { Text("微信原始数据和已记录的废纸篓项目保持保留。之后需重新连接索引。") }
@@ -588,18 +616,26 @@ struct PlanView: View {
         VStack(alignment: .leading, spacing: 20) {
             Text("确认本次附件清理").font(.title2.bold())
             HStack {
-                MetricCard(title: "将移入废纸篓", value: "\(plan.candidates.count) 个文件",
-                    note: plan.scope == .unassignedAttachments ? "来自手动选择的未归属附件" : "来自 \(plan.selectedMessages) 条选中消息", icon: "trash")
+                MetricCard(title: "将移入废纸篓", value: "\(plan.candidates.count) 个项目",
+                    note: plan.scope == .conversationAttachments ? "该聊天目录与索引中发现的全部附件" : plan.scope == .unassignedAttachments ? "来自手动选择的其他文件" : "来自 \(plan.selectedMessages) 条选中消息", icon: "trash")
                 MetricCard(title: "选中路径逻辑大小", value: SizeText.format(plan.logicalBytes), note: "去重分配空间估算 \(SizeText.format(plan.allocatedBytes))，不保证回收量", icon: "internaldrive")
             }
             Text("相关附件将无法从原聊天位置打开。文字消息和数据库保留；旧附件不保证能重新下载。移入废纸篓后空间仍被占用，需在 Finder 审阅并清空相关项目。")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if plan.scope == .conversationAttachments {
+                Text("该聊天的专属文件夹整目录移入废纸篓，共用目录中的分散附件单独处理。完成后直接更新列表，不重新扫描。文字消息和数据库保留。")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if plan.includesOtherReferences {
+                Toggle("我确认移除预览中的其他路径，同一附件在其他聊天中也可能无法打开。", isOn: $acceptsUnknownOwnership)
+                    .toggleStyle(.checkbox).font(.callout)
+            }
             if plan.scope == .unassignedAttachments {
                 if plan.sharedPathCount > 0 {
                     Text("包含 \(plan.sharedPathCount) 个共享文件路径。只移动勾选的路径，其他硬链接保留；仍有其他链接时不能回收该文件的数据空间。逻辑大小可能包含共享数据的重复引用。")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                Toggle("我已核对文件，了解“未归属”不代表无用，清理可能影响聊天中的附件。", isOn: $acceptsUnknownOwnership)
+                Toggle("我已核对文件，了解“未匹配聊天”不代表无用，清理可能影响聊天中的附件。", isOn: $acceptsUnknownOwnership)
                     .toggleStyle(.checkbox).font(.callout).fixedSize(horizontal: false, vertical: true)
             }
             List {
@@ -607,7 +643,8 @@ struct PlanView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text((item.relativePath as NSString).lastPathComponent).lineLimit(1)
                         Text(item.relativePath).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                        if item.expectedIdentity.links > 1 {
+                        if item.isDirectory { Text("整文件夹移入废纸篓").font(.caption).foregroundStyle(.secondary) }
+                        if !item.isDirectory && item.expectedIdentity.links > 1 {
                             Text("共享文件 · \(item.expectedIdentity.links) 个硬链接 · 仅处理此路径")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
@@ -622,9 +659,9 @@ struct PlanView: View {
             HStack {
                 Button("取消", role: .cancel) { model.plan = nil }.keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("将 \(plan.candidates.count) 个附件移入废纸篓") { model.executePlan() }
+                Button("将 \(plan.candidates.count) 个项目移入废纸篓") { model.executePlan() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(plan.candidates.isEmpty || model.busy || (plan.scope == .unassignedAttachments && !acceptsUnknownOwnership))
+                    .disabled(plan.candidates.isEmpty || model.busy || ((plan.scope == .unassignedAttachments || plan.includesOtherReferences) && !acceptsUnknownOwnership))
             }
         }.padding(28).frame(width: 700)
     }
@@ -651,7 +688,7 @@ struct HistoryView: View {
                                 Text(stateName(record.state)).font(.caption).foregroundStyle(.secondary)
                             }
                             Text("移入废纸篓 \(record.trashedCount) 个 · 已恢复 \(record.restoredCount) 个 · 本次计划 \(SizeText.format(record.logicalBytes))")
-                            if record.scope == .unassignedAttachments { Text("手动选择的未归属附件").font(.caption).foregroundStyle(.secondary) }
+                            if record.scope == .unassignedAttachments { Text("手动选择的其他文件").font(.caption).foregroundStyle(.secondary) }
                             if let accounts = record.accountIDs { Text("账号：" + accounts.joined(separator: "、")).font(.caption).foregroundStyle(.secondary) }
                             DisclosureGroup("逐项结果") {
                                 ForEach(record.items) { item in

@@ -14,7 +14,7 @@ from build_dependencies import main as build_dependencies
 
 PROJECT = Path(__file__).resolve().parents[1]
 OUTPUT = PROJECT / "build"
-VERSION = "0.3.2"
+VERSION = "0.3.9"
 
 
 def run(*args, capture=False):
@@ -40,23 +40,23 @@ def main(architecture=None):
         "-Xswiftc", "-gnone")
     binary_dir = Path(run(*swift_build, "--show-bin-path", capture=True))
     output = OUTPUT / architecture
-    BUNDLE = output / "WXStorageCleanUp.app"
+    BUNDLE = output / "微空间.app"
     output.mkdir(parents=True, exist_ok=True)
     if BUNDLE.exists():
         # This path is a deterministic build artifact created only by this script.
         shutil.rmtree(BUNDLE)
     contents = BUNDLE / "Contents"
-    executable = contents / "MacOS" / "WXStorageCleanUp"
+    executable = contents / "MacOS" / "微空间"
     resources = contents / "Resources"
     frameworks = contents / "Frameworks"
     for folder in [executable.parent, resources, frameworks]:
         folder.mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary_dir / "WXStorageCleanUp", executable)
     info = {
-        "CFBundleDevelopmentRegion": "zh_CN", "CFBundleExecutable": "WXStorageCleanUp",
+        "CFBundleDevelopmentRegion": "zh_CN", "CFBundleExecutable": "微空间",
         "CFBundleIdentifier": "local.wxstoragecleanup.app", "CFBundleInfoDictionaryVersion": "6.0",
-        "CFBundleName": "WXStorageCleanUp", "CFBundleDisplayName": "WXStorageCleanUp", "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "10", "LSMinimumSystemVersion": "14.0",
+        "CFBundleName": "微空间", "CFBundleDisplayName": "微空间", "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "17", "LSMinimumSystemVersion": "14.0",
         "CFBundleIconFile": "AppIcon.icns",
         "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
         "LSApplicationCategoryType": "public.app-category.utilities",
@@ -65,6 +65,7 @@ def main(architecture=None):
     (contents / "Info.plist").write_bytes(plistlib.dumps(info))
     (contents / "PkgInfo").write_text("APPL????")
     shutil.copy2(PROJECT / "scripts" / "key_capture.py", resources / "key_capture.py")
+    shutil.copy2(PROJECT / "docs" / "connection-guide.md", resources / "connection-guide.md")
     shutil.copy2(build_icon(output), resources / "AppIcon.icns")
     bundled = []
     cipher = str(dependency_root / "bin/sqlcipher")
@@ -139,7 +140,7 @@ def main(architecture=None):
         run(str(resources / "sqlcipher"), ":memory:", "PRAGMA cipher_version;")
     release = OUTPUT / "release"
     release.mkdir(exist_ok=True)
-    artifact_name = f"WXStorageCleanUp-{VERSION}-macOS-{architecture}"
+    artifact_name = f"微空间-{VERSION}-macOS-{architecture}"
     compatibility = {"version": VERSION, "architecture": architecture, "minimumOSVersion": minimum_os,
                      "components": components, "dependenciesBuiltFromSource": True, "opensslLinkage": "static",
                      "runtimeValidationOS": run("sw_vers", "-productVersion", capture=True),
@@ -156,18 +157,18 @@ def main(architecture=None):
     shutil.copytree(BUNDLE, stage / BUNDLE.name, symlinks=True)
     (stage / "Applications").symlink_to("/Applications", target_is_directory=True)
     (stage / "安装说明.txt").write_text(
-        f"WXStorageCleanUp {VERSION} · macOS {minimum_os}+ · {architecture}\n\n"
-        "安装：将「WXStorageCleanUp.app」拖入旁边的 Applications 文件夹，然后从应用程序打开。\n\n"
+        f"微空间 {VERSION} · macOS {minimum_os}+ · {architecture}\n\n"
+        "安装：将「微空间.app」拖入旁边的 Applications 文件夹，然后从应用程序打开。\n\n"
         "本预览版使用本地 ad-hoc 签名，尚未通过 Apple 公证。\n"
         "如果 macOS 阻止打开，请先核对下载来源，再参考 Apple 的单个应用放行说明：\n"
         "https://support.apple.com/102445\n\n"
         "清理将附件移入废纸篓。请核对后清空相应项目；共享文件的其他硬链接仍存在时，数据空间继续占用。\n"
         "项目：https://github.com/xbzzoo/WXStorageCleanUp\n", encoding="utf-8")
     dmg = release / (artifact_name + ".dmg")
-    run("hdiutil", "create", "-volname", "WXStorageCleanUp", "-srcfolder", str(stage),
+    run("hdiutil", "create", "-volname", "微空间", "-srcfolder", str(stage),
         "-format", "UDZO", "-fs", "HFS+", "-ov", str(dmg))
     checksums = []
-    for artifact in sorted(release.glob(f"WXStorageCleanUp-{VERSION}-macOS-*")):
+    for artifact in sorted(release.glob(f"微空间-{VERSION}-macOS-*")):
         digest = hashlib.sha256()
         with artifact.open("rb") as stream:
             while chunk := stream.read(1024 * 1024):

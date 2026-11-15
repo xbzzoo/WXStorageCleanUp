@@ -9,6 +9,20 @@ import WXStorageCleanUpCore
         XCTAssertFalse(model.busy)
         XCTAssertNil(model.errorMessage)
     }
+    func testLoadingBlocksPanelAndClipboardActions() {
+        let model = AppModel()
+        model.busy = true
+        model.pickRoot()
+        model.importSnapshot()
+        model.importKeys()
+        model.exportAnalysis()
+        model.openConnectionGuide()
+        model.copyConnectionDiagnostics()
+        XCTAssertTrue(model.busy)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.plan)
+    }
+
     func testCleanThenSelectAnotherChatAndCleanAgain() async throws {
         let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("CleanupFlowTests-" + UUID().uuidString)
@@ -30,16 +44,16 @@ import WXStorageCleanUpCore
         for internalID in chats {
             model.selectedConversation = try XCTUnwrap(model.analysis?.conversations.first { $0.conversation.internalID == internalID }?.id)
             XCTAssertTrue(model.canCleanCurrentConversation)
-            if internalID == "filehelper" {
-                model.checkedConversations = [try XCTUnwrap(model.selectedConversation)]
-                model.preview(conversations: true)
-            } else { model.previewCurrentConversation() }
+            let scannedAt = model.inventory?.scannedAt
+            model.previewCurrentConversation()
+            try await waitUntilIdle(model)
             XCTAssertFalse(try XCTUnwrap(model.plan).candidates.isEmpty)
             model.executePlan(trash: { source in
                 let target = trash.appendingPathComponent(UUID().uuidString)
                 try FileManager.default.moveItem(at: source, to: target); return target
             })
             try await waitUntilIdle(model)
+            XCTAssertEqual(model.inventory?.scannedAt, scannedAt)
             XCTAssertEqual(model.page, .chats)
             XCTAssertNotNil(model.currentConversation)
             XCTAssertTrue(model.checkedMessages.isEmpty)
@@ -51,7 +65,7 @@ import WXStorageCleanUpCore
         }
         XCTAssertEqual(model.records.count, 2)
         model.selectedConversation = model.analysis?.conversations.first { $0.conversation.internalID == "wxid_demo_mia" }?.id
-        XCTAssertNotNil(model.currentConversation)
+        XCTAssertNil(model.currentConversation)
         XCTAssertFalse(model.canCleanCurrentConversation)
     }
     func testUnassignedCleanupRefreshAndRestoreKeepsCurrentPage() async throws {
@@ -72,6 +86,7 @@ import WXStorageCleanUpCore
         let file = try XCTUnwrap(model.visibleUnassigned.first { $0.identity.links > 1 })
         model.checkedUnassigned = [file.id]
         model.previewUnassigned()
+        try await waitUntilIdle(model)
         let trash = temporary.appendingPathComponent("trash")
         try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
         model.executePlan(trash: { source in
@@ -93,7 +108,7 @@ import WXStorageCleanUpCore
         XCTAssertEqual(model.page, .unassigned)
         XCTAssertEqual(model.accountUnassigned.count, initialCount)
     }
-    func testUnassignedFiltersSelectionAndAccountSwitch() throws {
+    func testUnassignedFiltersSelectionAndAccountSwitch() async throws {
         let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("UnassignedModelTests-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -110,6 +125,7 @@ import WXStorageCleanUpCore
         let file = try XCTUnwrap(model.visibleUnassigned.first { $0.identity.links == 1 })
         model.checkedUnassigned = [file.id]
         model.previewUnassigned()
+        try await waitUntilIdle(model)
         XCTAssertEqual(model.plan?.scope, .unassignedAttachments)
         model.selectedAccount = inventory.accounts[1].id
         XCTAssertTrue(model.checkedUnassigned.isEmpty)

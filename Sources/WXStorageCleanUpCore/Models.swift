@@ -70,6 +70,13 @@ public struct Inventory: Sendable {
         }
     }
     public var complete: Bool { warnings.isEmpty }
+    public func removing(paths: Set<String>, directoryPrefixes: [String]) -> Inventory {
+        Inventory(root: root, accounts: accounts,
+            files: files.filter { file in !paths.contains(file.relativePath) && !directoryPrefixes.contains { file.relativePath.hasPrefix($0) } },
+            warnings: warnings, skippedLinks: skippedLinks, blockedAccountIDs: blockedAccountIDs, scannedAt: scannedAt,
+            applicationBytes: applicationBytes, applicationAllocatedBytes: applicationAllocatedBytes,
+            applicationScanComplete: applicationScanComplete)
+    }
     public func url(for file: StoredFile) -> URL { root.appendingPathComponent(file.relativePath) }
 }
 

@@ -27,6 +27,24 @@ def publish(event, **fields):
     print(json.dumps(dict(event=event, **fields), sort_keys=True), flush=True)
 
 
+class CaptureFailure(RuntimeError):
+    def __init__(self, code, **diagnostic):
+        super().__init__(code)
+        self.code = code
+        self.diagnostic = diagnostic
+
+
+def resume_error_kind(error):
+    # LLDB <= 17 says "still running"; newer versions say "already running".
+    # Only classify text in memory. Never put debugger error text in the log.
+    message = (error.GetCString() or "").lower()
+    if "already running" in message or "still running" in message:
+        return "already_running"
+    if any(value in message for value in ("permission denied", "operation not permitted", "not allowed to", "not permitted to")):
+        return "permission_denied"
+    return "other"
+
+
 def authenticate_page(key, page):
     if not isinstance(key, bytes) or len(key) != 32 or len(page) != 4096:
         return False
@@ -108,6 +126,13 @@ class RequestedDatabases:
     def complete(self):
         return len(self.keys) == len(self.pages)
 
+    def report(self, event, **fields):
+        pending = sorted(set(self.pages) - set(self.keys))
+        # Database names come from the request allowlist. Never include key bytes,
+        # account names, absolute paths, debugger output or chat contents.
+        publish(event, verified=len(self.keys), total=len(self.pages), complete=self.complete,
+                pending=pending[:8], pending_count=len(pending), **fields)
+
     def save(self):
         private_save(self.cache_file, {"version": 1, "account": self.account, "keys": self.keys})
 
@@ -142,6 +167,9 @@ class ChildCapture:
         self.target = None
         self.lldb = None
         self.architecture = None
+        self.observations = 0
+        self.handled_stop = None
+        self.breakpoint = None
 
     def cancel(self, _signal, _frame):
         self.cancelled = True
@@ -153,6 +181,7 @@ class ChildCapture:
                 continue
             if thread.GetStopReasonDataCount() < 2 or thread.GetStopReasonDataAtIndex(0) != breakpoint_id:
                 continue
+            self.observations += 1
             frame = thread.GetFrameAtIndex(0)
             if self.architecture.startswith("arm64"):
                 registers = [frame.FindRegister("x%d" % index).GetValueAsUnsigned() for index in range(1, 7)]
@@ -179,17 +208,83 @@ class ChildCapture:
             if len(secret) != length:
                 continue
             if self.request.observe(secret, salt, iterations):
-                publish("progress", verified=len(self.request.keys), total=len(self.request.pages))
+                self.request.report("progress")
 
     def read(self, address, size):
         error = self.lldb.SBError()
         value = self.process.ReadMemory(address, size, error)
         return bytes(value) if error.Success() and value is not None else b""
 
-    def launch(self, executable, arguments):
+    def diagnostic(self, error=None):
+        fields = dict(state=int(self.process.GetState()), stopID=int(self.process.GetStopID()),
+                      stopReasons=sorted({int(thread.GetStopReason()) for thread in self.process})[:16])
+        if self.process.GetState() == self.lldb.eStateExited:
+            fields["exitStatus"] = int(self.process.GetExitStatus())
+        if self.breakpoint is not None:
+            fields["breakpointLocations"] = int(self.breakpoint.GetNumLocations())
+        if error is not None:
+            fields.update(errorType=int(error.GetType()), errorCode=int(error.GetError()), resumeKind=resume_error_kind(error))
+        return fields
+
+    def terminal_reason(self, state):
+        lldb = self.lldb
+        if state == lldb.eStateCrashed:
+            return "child_crashed"
+        if state in (lldb.eStateExited, lldb.eStateDetached, lldb.eStateInvalid):
+            return "child_exited"
+        return None
+
+    def handle_process_event(self, event, breakpoint_id):
+        lldb = self.lldb
+        if not lldb.SBProcess.EventIsProcessEvent(event) or not event.GetType() & lldb.SBProcess.eBroadcastBitStateChanged:
+            return None
+        owner = lldb.SBProcess.GetProcessFromEvent(event)
+        if not owner.IsValid() or owner.GetUniqueID() != self.process.GetUniqueID():
+            return None
+        state = lldb.SBProcess.GetStateFromEvent(event)
+        reason = self.terminal_reason(state)
+        if reason:
+            self.request.report("diagnostic", **self.diagnostic())
+            return reason
+        # Consuming the state event updates LLDB's public run lock. A polled
+        # GetState() can describe a startup stop that LLDB already auto-resumed.
+        if state != lldb.eStateStopped or lldb.SBProcess.GetRestartedFromEvent(event):
+            return None
+        if self.process.GetState() != lldb.eStateStopped:
+            return None
+        stop_id = self.process.GetStopID()
+        if stop_id == self.handled_stop:
+            return None
+        self.handled_stop = stop_id
+        for thread in self.process:
+            stop = thread.GetStopReason()
+            fatal_signal = stop == lldb.eStopReasonSignal and thread.GetStopReasonDataCount() > 0 and \
+                thread.GetStopReasonDataAtIndex(0) in (signal.SIGABRT, signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGFPE)
+            if stop == lldb.eStopReasonException or fatal_signal:
+                self.request.report("diagnostic", **self.diagnostic())
+                return "child_crashed"
+        self.inspect_stop(breakpoint_id)
+        if self.request.complete:
+            return "complete"
+        error = self.process.Continue()
+        if error.Success():
+            return None
+        fields = self.diagnostic(error)
+        reason = self.terminal_reason(self.process.GetState())
+        if reason:
+            self.request.report("diagnostic", **fields)
+            return reason
+        if fields["resumeKind"] == "already_running" or self.process.GetState() in (lldb.eStateRunning, lldb.eStateStepping):
+            self.request.report("resume_race", **fields)
+            return None
+        code = "debug_resume_denied" if fields["resumeKind"] == "permission_denied" else "child_resume_failed"
+        raise CaptureFailure(code, **fields)
+
+    def launch(self, executable, arguments, data_home=None):
         import lldb
         self.lldb = lldb
         lldb.SBDebugger.Initialize()
+        publish("debugger", lldbVersion=lldb.SBDebugger.GetVersionString().splitlines()[0][:200])
         # Pass False at creation time: neither user nor project .lldbinit files run.
         self.debugger = lldb.SBDebugger.Create(False)
         self.debugger.SkipLLDBInitFiles(True)
@@ -203,43 +298,59 @@ class ChildCapture:
         if not self.target.IsValid() or not (self.architecture.startswith("arm64") or self.architecture == "x86_64"):
             raise RuntimeError("unsupported_target_architecture")
         breakpoint = self.target.BreakpointCreateByName("CCKeyDerivationPBKDF")
+        self.breakpoint = breakpoint
         if not breakpoint.IsValid():
             raise RuntimeError("breakpoint_unavailable")
         info = lldb.SBLaunchInfo(arguments)
         info.SetLaunchFlags(info.GetLaunchFlags() & ~lldb.eLaunchFlagDisableASLR)
         info.SetWorkingDirectory(str(Path(executable).parent))
+        if data_home is not None:
+            home_path = Path(data_home).resolve(strict=True)
+            if not home_path.is_dir():
+                raise ValueError("invalid_data_home")
+            # The debug copy is no longer sandboxed. Keep Foundation's home at
+            # the original container so it loads the selected account's existing
+            # preferences/databases instead of creating another profile.
+            # Only the launched child's environment is changed, never this helper's.
+            info.SetEnvironmentEntries(["CFFIXED_USER_HOME=" + str(home_path)], True)
         for descriptor in (0, 1, 2):
             info.AddSuppressFileAction(descriptor, descriptor == 0, descriptor != 0)
         error = lldb.SBError()
         self.process = self.target.Launch(info, error)
         if error.Fail() or not self.process.IsValid():
             # Avoid forwarding debugger output, paths, argument values or process memory.
-            raise RuntimeError("debug_launch_denied")
-        publish("launched", pid=self.process.GetProcessID(), verified=len(self.request.keys), total=len(self.request.pages))
-        end = time.monotonic() + self.timeout
+            raise CaptureFailure("debug_launch_denied", errorType=int(error.GetType()), errorCode=int(error.GetError()))
+        self.request.report("launched", pid=self.process.GetProcessID(), targetArchitecture=self.architecture)
+        started = time.monotonic()
+        end = started + self.timeout
         listener = self.debugger.GetListener()
         last_report = 0
-        handled_stop = None
+        reason = "capture_timeout"
         while not self.cancelled and time.monotonic() < end:
-            state = self.process.GetState()
-            if state in (lldb.eStateExited, lldb.eStateCrashed, lldb.eStateDetached, lldb.eStateInvalid):
-                break
-            if state == lldb.eStateStopped and self.process.GetStopID() != handled_stop:
-                handled_stop = self.process.GetStopID()
-                self.inspect_stop(breakpoint.GetID())
-                error = self.process.Continue()
-                # LLDB's public state can briefly lag the private launch state. A queued
-                # startup stop may already have resumed when the listener observes it.
-                if error.Fail() and "already running" not in (error.GetCString() or "").lower():
-                    raise RuntimeError("child_resume_failed")
-                if self.request.complete:
-                    break
             if time.monotonic() - last_report > 3:
-                publish("waiting", verified=len(self.request.keys), total=len(self.request.pages))
+                self.request.report("waiting", elapsed=int(time.monotonic() - started),
+                                    remaining=max(0, int(end - time.monotonic())), observations=self.observations,
+                                    breakpointLocations=int(breakpoint.GetNumLocations()))
                 last_report = time.monotonic()
             event = lldb.SBEvent()
-            listener.WaitForEvent(1, event)
+            if listener.WaitForEvent(1, event):
+                outcome = self.handle_process_event(event, breakpoint.GetID())
+                if outcome:
+                    reason = outcome
+                    break
+            else:
+                # Terminal fallback only. Never resume or inspect memory from
+                # a polled stopped state without consuming its actual event.
+                outcome = self.terminal_reason(self.process.GetState())
+                if outcome:
+                    reason = outcome
+                    break
         self.request.save()
+        if not self.cancelled and not self.request.complete:
+            if reason == "capture_timeout" and breakpoint.GetNumLocations() == 0:
+                reason = "breakpoint_unresolved"
+            self.request.report("incomplete", code=reason, observations=self.observations,
+                                breakpointLocations=int(breakpoint.GetNumLocations()))
         return 130 if self.cancelled else (0 if self.request.complete else 3)
 
     def release(self):
@@ -250,7 +361,14 @@ class ChildCapture:
                 # Never kill a process merely because it shares WeChat's name.
                 if self.process.GetState() != lldb.eStateStopped:
                     self.process.Stop()
+                    end = time.monotonic() + 5
+                    listener = self.debugger.GetListener()
+                    while self.process.GetState() not in (lldb.eStateStopped, lldb.eStateCrashed,
+                            lldb.eStateExited, lldb.eStateDetached, lldb.eStateInvalid) and time.monotonic() < end:
+                        listener.WaitForEvent(1, lldb.SBEvent())
                 self.target.DeleteAllBreakpoints()
+                # Older Apple LLDB Python bindings expose only Detach(). Its
+                # default resumes the child; the bool overload is not portable.
                 error = self.process.Detach()
                 if error.Fail():
                     # Resume a stopped child even when detach failed, so it is not left frozen.
@@ -269,12 +387,13 @@ def main():
     parser.add_argument("--keys", required=True)
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--executable")
+    parser.add_argument("--data-home")
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("child_arguments", nargs="*")
     args = parser.parse_args()
     os.umask(0o077)
     request = RequestedDatabases(args.db_root, args.request, args.keys)
-    publish("cache", verified=len(request.keys), total=len(request.pages), complete=request.complete)
+    request.report("cache")
     if args.verify_only or request.complete:
         # Do not destroy a previously complete key cache on a read-only readiness check.
         return 0 if request.complete else 3
@@ -284,10 +403,10 @@ def main():
     signal.signal(signal.SIGINT, capture.cancel)
     signal.signal(signal.SIGTERM, capture.cancel)
     try:
-        return capture.launch(args.executable, args.child_arguments)
+        return capture.launch(args.executable, args.child_arguments, args.data_home)
     finally:
         capture.release()
-        publish("finished", verified=len(request.keys), total=len(request.pages), complete=request.complete)
+        request.report("finished")
 
 
 if __name__ == "__main__":
@@ -299,7 +418,8 @@ if __name__ == "__main__":
         allowed = {"invalid_request", "invalid_database_allowlist", "unsafe_database_path", "symlinked_database",
                    "database_outside_selected_account", "unsupported_database_page", "unsafe_cache_file",
                    "cached_account_mismatch", "unsafe_cache_location", "unsupported_target_architecture",
-                   "breakpoint_unavailable", "debug_launch_denied", "child_resume_failed", "executable_required"}
-        publish("error", code=code if code in allowed else "capture_failed")
+                   "breakpoint_unavailable", "debug_launch_denied", "debug_resume_denied", "child_resume_failed", "executable_required", "invalid_data_home"}
+        publish("error", code=code if code in allowed else "capture_failed",
+                **(error.diagnostic if isinstance(error, CaptureFailure) else {}))
         result = 2
     raise SystemExit(result)
