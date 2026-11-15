@@ -1,0 +1,15 @@
+.build/
+build/
+.swiftpm/
+.DS_Store
+*.db
+*.db-wal
+*.db-shm
+keys*.json
+__pycache__/
+*.dmg
+*.zip
+*.pkg
+.env
+.env.*
+*.pem
