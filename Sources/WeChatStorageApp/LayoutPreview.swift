@@ -3,6 +3,7 @@ import AppKit
 import WeChatStorageCore
 
 private final class LayoutCheckWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
@@ -17,7 +18,7 @@ private final class LayoutCheckWindow: NSWindow {
             try IndexReader.load(snapshot: demo.snapshots[account.id]!, account: account, inventory: inventory)
         }
         let application = NSApplication.shared
-        application.setActivationPolicy(.prohibited)
+        application.setActivationPolicy(.accessory)
         application.finishLaunching()
         let cases: [(String, CGFloat, CGFloat, Bool, Bool, String)] = [
             ("welcome-1080", 1080, 700, false, false, ""),
@@ -83,7 +84,7 @@ private final class LayoutCheckWindow: NSWindow {
             window.isReleasedWhenClosed = false
             window.contentView = hosting
             window.setContentSize(NSSize(width: contentWidth, height: contentHeight))
-            window.orderFront(nil)
+            window.makeKeyAndOrderFront(nil)
             window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
             if name == "after-cleanup-next-1080" {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.2))

@@ -14,6 +14,8 @@
 - [下载 ZIP 应用包](https://github.com/xbzzoo/WeChatStorage/releases/download/v0.3.0/WeChatStorage-0.3.0-macOS-arm64.zip)：解压后将应用拖入「应用程序」。
 - [发布说明与 SHA-256 校验文件](https://github.com/xbzzoo/WeChatStorage/releases/tag/v0.3.0)。
 
+升级时先退出旧版，在 Applications 出现同名应用提示时选择「替换」，避免保留多个应用副本。替换应用不会删除微信数据和本工具的账号连接记录。
+
 安装包使用本地 ad-hoc 签名，**尚未取得 Developer ID 签名或 Apple 公证**。首次打开可能被 Gatekeeper 阻止；确认下载来源后，可按 [Apple 官方说明](https://support.apple.com/102445)为该应用单独放行。无需关闭 SIP 或系统整体安全检查。
 
 应用包已包含 SQLCipher、OpenSSL 和 Zstandard，扫描和手动整理附件无需安装 Homebrew。**首次自动连接聊天索引仍需要 Xcode 或 Command Line Tools 提供的系统 Python / LLDB，以及本人完成微信登录确认。**
