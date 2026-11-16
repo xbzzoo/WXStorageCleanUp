@@ -31,6 +31,17 @@ enum MediaResolver {
         return String(data: data, encoding: .utf8)
     }
 
+    static func imageIdentifier(_ xml: String?) -> String? {
+        guard let xml, xml.utf8.count <= 16 * 1024 * 1024, let start = xml.firstIndex(of: "<") else { return nil }
+        let text = String(xml[start...])
+        guard !text.localizedCaseInsensitiveContains("<!DOCTYPE"), !text.localizedCaseInsensitiveContains("<!ENTITY") else { return nil }
+        let metadata = MessageXML()
+        let parser = XMLParser(data: Data(text.utf8)); parser.delegate = metadata; parser.shouldResolveExternalEntities = false
+        guard parser.parse(), metadata.imageIDs.count == 1, let identifier = metadata.imageIDs.first,
+              Scanner.isHash(identifier) else { return nil }
+        return identifier
+    }
+
     static func resolve(xml: String?, kind: MediaKind, account: Account, inventory: Inventory, context: Context? = nil) throws -> (paths: [String], summary: String, reason: String) {
         guard kind == .file || kind == .video else { return ([], "\(kind.rawValue)消息", "此消息类型未建立文件映射") }
         guard let xml, let start = xml.firstIndex(of: "<"), xml.utf8.count <= 16 * 1024 * 1024 else {
@@ -117,6 +128,7 @@ enum MediaResolver {
 }
 
 private final class MessageXML: NSObject, XMLParserDelegate {
+    var imageIDs: [String] = []
     var path = [String](), values = [String: String](), videoMD5 = "", videoLength = "", hasAttachment = false
     var appType: String { value("appmsg/type") }
     var title: String { value("appmsg/title") }
@@ -128,6 +140,7 @@ private final class MessageXML: NSObject, XMLParserDelegate {
     }
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String]) {
         path.append(elementName)
+        if elementName == "img", path == ["msg", "img"], let identifier = attributes["md5"] { imageIDs.append(identifier.lowercased()) }
         if elementName == "appattach" { hasAttachment = true }
         if elementName == "videomsg" { videoMD5 = attributes["md5"] ?? ""; videoLength = attributes["length"] ?? "" }
     }

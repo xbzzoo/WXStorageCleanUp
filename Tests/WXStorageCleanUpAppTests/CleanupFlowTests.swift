@@ -23,6 +23,60 @@ import WXStorageCleanUpCore
         XCTAssertNil(model.plan)
     }
 
+    func testScanPresentsConnectionAfterAnalysisAndDoesNotReopenWhenConnected() async throws {
+        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("ScanConnectionFlow-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let demo = try DemoFactory.create(parent: temporary)
+        let model = AppModel(cleanup: CleanupService(journalDirectory: temporary.appendingPathComponent("journal")))
+        model.scan(demo.root, demo: false)
+        XCTAssertFalse(model.showingConnection)
+        try await waitUntilIdle(model)
+        XCTAssertNotNil(model.analysis)
+        XCTAssertTrue(model.showingConnection)
+        XCTAssertTrue(model.notice?.contains("请先连接聊天") == true)
+        XCTAssertEqual(model.page, .overview)
+
+        let inventory = try XCTUnwrap(model.inventory)
+        let account = try XCTUnwrap(inventory.accounts.first)
+        model.indexes[account.id] = try IndexReader.load(snapshot: demo.snapshot, account: account, inventory: inventory)
+        model.showingConnection = false
+        model.refresh()
+        try await waitUntilIdle(model)
+        XCTAssertFalse(model.showingConnection)
+        XCTAssertNotNil(model.indexes[account.id])
+    }
+
+    func testScanWithNoAccountsDoesNotPresentConnection() async throws {
+        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("EmptyScanFlow-" + UUID().uuidString)
+        let root = temporary.appendingPathComponent("Data")
+        try FileSafety.privateDirectory(root)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let model = AppModel(cleanup: CleanupService(journalDirectory: temporary.appendingPathComponent("journal")))
+        model.scan(root, demo: false)
+        try await waitUntilIdle(model)
+        XCTAssertTrue(model.inventory?.accounts.isEmpty == true)
+        XCTAssertFalse(model.showingConnection)
+    }
+
+    func testScanRestoresSavedIndexOrPromptsWhenSavedIndexIsUnavailable() async throws {
+        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("SavedScanFlow-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let demo = try DemoFactory.create(parent: temporary)
+        let store = AccountConnectionStore(directory: temporary.appendingPathComponent("connections"))
+        for valid in [true, false] {
+            try store.save(accountID: demo.accountID, root: demo.root,
+                snapshot: valid ? demo.snapshot : temporary.appendingPathComponent("missing-snapshot"))
+            let model = AppModel(cleanup: CleanupService(journalDirectory: temporary.appendingPathComponent("journal")), connectionStore: store)
+            model.scan(demo.root, demo: false)
+            try await waitUntilIdle(model)
+            XCTAssertEqual(model.showingConnection, !valid)
+            XCTAssertEqual(model.indexes[demo.accountID] != nil, valid)
+        }
+    }
+
     func testCleanThenSelectAnotherChatAndCleanAgain() async throws {
         let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("CleanupFlowTests-" + UUID().uuidString)

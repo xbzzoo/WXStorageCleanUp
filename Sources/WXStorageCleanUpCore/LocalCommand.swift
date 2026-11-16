@@ -65,31 +65,43 @@ enum LocalCommand {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments; process.environment = environment
         process.standardInput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice; process.standardOutput = pipe
-        let drained = DispatchGroup()
-        try process.run()
-        drained.enter()
-        DispatchQueue.global(qos: .utility).async {
-            while true {
-                let data = pipe.fileHandleForReading.availableData
-                if data.isEmpty { break }; output.append(data)
-            }
-            drained.leave()
+        let descriptor = pipe.fileHandleForReading.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            throw StorageError.invalid("无法准备本地连接输出通道。")
         }
-        let started = Date()
-        var stopRequested: Date?, cancelled = false
+        defer { try? pipe.fileHandleForReading.close() }
+        try process.run()
+        try? pipe.fileHandleForWriting.close()
+        func drainAvailable() {
+            var buffer = [UInt8](repeating: 0, count: 65536)
+            // Bound each drain so noisy or inherited writers cannot starve
+            // cancellation and deadline checks. Never wait for pipe EOF.
+            for _ in 0..<16 {
+                let count = Darwin.read(descriptor, &buffer, buffer.count)
+                if count > 0 { output.append(Data(buffer.prefix(count))) }
+                else if count < 0 && errno == EINTR { continue }
+                else { break }
+            }
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        var stopRequested: TimeInterval?, cancelled = false
         while process.isRunning {
-            if (!ignoreCancellation && Task.isCancelled) || Date().timeIntervalSince(started) > timeout {
+            drainAvailable()
+            let now = ProcessInfo.processInfo.systemUptime
+            if (!ignoreCancellation && Task.isCancelled) || now - started > timeout {
                 if stopRequested == nil {
                     cancelled = !ignoreCancellation && Task.isCancelled
-                    process.terminate(); stopRequested = Date()
-                } else if Date().timeIntervalSince(stopRequested!) > 15 {
+                    process.terminate(); stopRequested = now
+                } else if now - stopRequested! > 15 {
                     // Only our exact child PID, never a process-name or system-wide kill.
                     kill(process.processIdentifier, SIGKILL)
                 }
             }
             Thread.sleep(forTimeInterval: 0.05)
         }
-        process.waitUntilExit(); drained.wait()
+        process.waitUntilExit()
+        drainAvailable()
         if cancelled { throw CancellationError() }
         if stopRequested != nil { throw StorageError.invalid("本地连接步骤超时，已停止本工具启动的任务。") }
         return output.result(process.terminationStatus)

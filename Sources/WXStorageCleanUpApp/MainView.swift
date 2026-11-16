@@ -111,13 +111,21 @@ struct MainView: View {
                 Picker("账号", selection: $model.selectedAccount) {
                     ForEach(inventory.accounts) { account in Text(model.accountLabel(account)).tag(account.id) }
                 }.labelsHidden().frame(width: 230).disabled(model.busy)
+                Button { model.showingConnection = true } label: {
+                    Label(model.indexes[model.selectedAccount] == nil ? "连接聊天" : "管理连接",
+                          systemImage: "link")
+                        .font(.callout.weight(.semibold)).padding(.horizontal, 14).padding(.vertical, 9)
+                }
+                .buttonStyle(PrimaryScanButtonStyle())
+                .disabled(model.busy)
+                .help("自动获取密钥并连接所选账号的聊天索引")
+                .accessibilityIdentifier("connect-chats")
             }
             Button { model.exportAnalysis() } label: { Image(systemName: "square.and.arrow.up") }
                 .help("导出空间分析，文件包含聊天名称，请自行保管")
                 .disabled(model.analysis == nil)
             Button { model.refresh() } label: { Label("重新扫描", systemImage: "arrow.clockwise") }
                 .disabled(model.busy || model.inventory == nil)
-            Text("微空间").font(.caption.weight(.semibold)).foregroundStyle(Color.accentGreen).fixedSize()
         }
       }.padding(26).frame(maxWidth: .infinity, alignment: .leading).accessibilityIdentifier("page-header")
     }
@@ -513,98 +521,52 @@ struct ConversationDetailView: View {
 
 struct ConnectionView: View {
     @EnvironmentObject var model: AppModel
-    @State private var confirmErase = false
-    @State private var confirmForget = false
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack { Text("连接聊天索引").font(.title2.bold()); Spacer(); Button("完成") { model.showingConnection = false }.disabled(model.busy) }
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Text("连接聊天索引").font(.title2.bold())
+                Spacer()
+                Button("完成") { model.showingConnection = false }.disabled(model.busy)
+            }
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    Text("选择本机账号后自动连接。每个账号的密钥与索引独立保存，切换账号不会沿用上一个账号的清理选择。")
-                        .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 18) {
                     if let inventory = model.inventory {
                         Picker("当前账号", selection: $model.selectedAccount) {
                             ForEach(inventory.accounts) { Text(model.accountLabel($0)).tag($0.id) }
                         }.disabled(model.busy)
                     }
                     GroupBox {
-                        VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 14) {
                             Label("自动获取密钥并连接", systemImage: "bolt.shield").font(.headline)
-                            Text("已有有效连接信息时会直接复用。首次连接会正常退出微信并打开临时连接窗口，请先保存草稿，再在临时微信中进入所选账号。")
+                            Text("已有有效连接信息时会直接复用。首次连接会退出微信并打开临时窗口，请先保存草稿，再登录所选账号。")
                                 .font(.callout).foregroundStyle(.secondary)
-                            Text("临时窗口仍使用本机账号数据，可能更新登录状态和缓存；请仅用于登录和加载聊天，不要发送消息。工具只重签临时副本，不更改已安装微信的签名或系统保护。")
-                                .font(.caption).foregroundStyle(.secondary)
                             Button("自动连接所选账号") { model.automaticallyConnect() }
-                                .buttonStyle(.borderedProminent).disabled(model.busy || model.isDemo || model.selectedAccount.isEmpty)
+                                .buttonStyle(.borderedProminent)
+                                .disabled(model.busy || model.isDemo || model.selectedAccount.isEmpty)
                             if model.captureTotal > 0 {
                                 ProgressView(value: Double(model.captureVerified), total: Double(model.captureTotal))
-                                Text("已验证 \(model.captureVerified)/\(model.captureTotal) 个加密索引").font(.caption).foregroundStyle(.secondary)
+                                Text("已验证 \(model.captureVerified)/\(model.captureTotal) 个加密索引")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
                             if model.connectionStatus[model.selectedAccount] == "连接中" {
                                 Text(model.status).font(.callout).textSelection(.enabled)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
-                            Text("密钥仅保存在本机私有目录。首次可能需要手机确认、macOS 开发工具授权或打开聊天以加载所需索引。")
+                            Text("需要 Xcode 或 Command Line Tools。请按提示完成手机确认，并打开联系人和历史聊天以加载索引。")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Button("忘记所选账号的自动连接…", role: .destructive) { confirmForget = true }
-                                .disabled(model.busy || model.isDemo || model.selectedAccount.isEmpty)
+                            Text("临时微信使用本机账号数据，可能更新登录状态和缓存；请仅用于登录和加载聊天。密钥仅保存在本机。")
+                                .font(.caption).foregroundStyle(.secondary)
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
                     }
                     if let error = model.errorMessage {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label { Text(error).textSelection(.enabled) } icon: { Image(systemName: "exclamationmark.triangle") }
-                                .font(.callout).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                            Button("复制连接诊断") { model.copyConnectionDiagnostics() }.disabled(model.busy || model.isDemo)
-                            Text("诊断包含版本、数量和调试状态，不含密钥或聊天内容。")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    DisclosureGroup("登录后未继续连接 / 获取本地密钥指引") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("1. 临时微信中登录的账号须与上方所选账号一致。手机确认后，请打开联系人、包含图片的聊天及较早的历史消息。")
-                            Text("2. 留意已验证数量和等待中的数据库。全部验证后会自动退出临时微信并继续连接；本轮最多等待约 4 分钟，部分有效密钥会保留，可重试补齐。")
-                            Text("3. 若一直为 0，检查开发者工具授权；也可能是当前微信版本不兼容。可打开完整指引，使用终端查看连接进度和失败原因。")
-                            Text("4. 已获取的 keys.json 可在下方定位，再通过「高级：手动导入」连接。部分密钥不保证足够连接；从其他来源获取时，须是本机所选账号的数据库密钥。")
-                            HStack {
-                                Button("定位所选账号的本地密钥…") { model.revealSelectedKeys() }
-                                    .disabled(model.busy || model.isDemo || model.selectedAccount.isEmpty)
-                                Button("打开完整操作指引") { model.openConnectionGuide() }
-                                Button("复制连接诊断") { model.copyConnectionDiagnostics() }
-                                    .disabled(model.busy || model.isDemo || model.selectedAccount.isEmpty)
-                            }
-                        }.font(.callout).foregroundStyle(.secondary).padding(.top, 12)
-                    }
-                    DisclosureGroup("高级：手动导入") {
-                        VStack(alignment: .leading, spacing: 14) {
-                            Text("你也可以导入当前账号的本地密钥 JSON，或已有的已解密 db_storage。没有原始数据库绑定的外部索引仅供预览。")
-                                .font(.callout).foregroundStyle(.secondary)
-                            Button("选择本地密钥并连接…") { model.importKeys() }.disabled(model.busy)
-                            Button("导入已解密索引…") { model.importSnapshot() }.disabled(model.busy)
-                            Text("SQLCipher：\(SnapshotService.sqlcipherURL() == nil ? "未检测到" : "已检测到") · 自动取钥支持 Apple Silicon / Intel，需要 Xcode 或 Command Line Tools")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }.padding(.top, 12)
-                    }
-                    Text("支持普通图片，以及内容校验一致的文件和视频。语音、转发内媒体和不能确认归属的项目会保留。")
-                        .font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Button("清除本工具的索引快照…", role: .destructive) { confirmErase = true }.disabled(model.busy)
-                        Spacer()
-                        Button("体验多账号演示") { model.showingConnection = false; model.loadDemo() }.disabled(model.busy)
+                        Label { Text(error).textSelection(.enabled) } icon: { Image(systemName: "exclamationmark.triangle") }
+                            .font(.callout).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
-            if model.busy {
-                HStack { ProgressView().controlSize(.small); Text("正在执行连接步骤…").font(.caption); Spacer(); Button("取消") { model.cancel() } }
-            }
-        }.padding(28).frame(width: 640, height: 660)
+        }.padding(28).frame(width: 640, height: 520)
         .modifier(GlobalLoading())
         .interactiveDismissDisabled(model.busy)
-        .confirmationDialog("清除本工具创建的明文索引快照？", isPresented: $confirmErase) {
-            Button("清除快照", role: .destructive) { model.eraseSnapshots() }
-        } message: { Text("微信原始数据和已记录的废纸篓项目保持保留。之后需重新连接索引。") }
-        .confirmationDialog("忘记账号 \(model.selectedAccount) 的自动连接？", isPresented: $confirmForget) {
-            Button("忘记此账号连接", role: .destructive) { model.forgetSelectedConnection() }
-        } message: { Text("将删除该账号在本工具中保存的密钥和连接记录。其他账号及微信原始数据保留。") }
     }
 }
 

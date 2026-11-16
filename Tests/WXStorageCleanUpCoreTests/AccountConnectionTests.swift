@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import Darwin
 @testable import WXStorageCleanUpCore
 
 final class AccountConnectionTests: XCTestCase {
@@ -80,6 +81,40 @@ final class AccountConnectionTests: XCTestCase {
         catch is CancellationError {}
     }
 
+    func testCommandReturnsWhenDescendantKeepsOutputPipeOpen() throws {
+        let started = Date()
+        let script = "import subprocess,sys,json; child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(5)']); print(json.dumps({'event':'launched','pid':child.pid}), flush=True)"
+        let result = try LocalCommand.run("/usr/bin/python3", ["-c", script], timeout: 2)
+        if let pid = result.events.first?.pid { _ = Darwin.kill(pid, SIGTERM) }
+        XCTAssertEqual(result.status, 0)
+        XCTAssertNotNil(result.events.first?.pid)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+    }
+
+    func testSQLCipherChildTimeoutReturnsAnError() throws {
+        let executable = temporary.appendingPathComponent("owned-sqlcipher-fixture")
+        try Data("#!/usr/bin/python3\nimport time\ntime.sleep(30)\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let started = Date()
+        XCTAssertThrowsError(try SnapshotService.runSQLCipher(executable: executable,
+            database: temporary.appendingPathComponent("unused.db"), script: ".quit\n", timeout: 0.1)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("超出时限"))
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3)
+    }
+
+    func testSQLCipherGrowingOutputExtendsIdleDeadline() throws {
+        // Launch the system shell directly: executing a new unsigned script can
+        // incur macOS launch assessment delays unrelated to output inactivity.
+        let fixture = temporary.appendingPathComponent("growing-output.sh")
+        let source = "#!/bin/sh\nIFS= read -r output\n: > \"$output\"\ni=0\nwhile [ \"$i\" -lt 80 ]; do\n printf '0123456789' >> \"$output\"\n /bin/sleep 0.05\n i=$((i+1))\ndone\n"
+        try Data(source.utf8).write(to: fixture)
+        let output = temporary.appendingPathComponent("fixture-output.db")
+        try SnapshotService.runSQLCipher(executable: URL(fileURLWithPath: "/bin/sh"), database: fixture,
+            script: output.path + "\n", timeout: 3, outputDatabase: output)
+        XCTAssertEqual(try Data(contentsOf: output).count, 80 * 10)
+    }
+
     func testTemporaryLaunchPreservesContainerHomeForAllScanEntryPoints() throws {
         let home = temporary.appendingPathComponent("Library/Containers/com.tencent.xinWeChat/Data")
         for relative in ["Documents/xwechat_files/a/db_storage", "Documents/xwechat_files/b/db_storage"] {
@@ -112,7 +147,7 @@ final class AccountConnectionTests: XCTestCase {
         XCTAssertTrue(CaptureFeedback.failure(denied).contains("开发者工具权限"))
         let resumed = LocalCommandResult(status: 2, output: Data(), events: [
             try event(#"{"event":"error","code":"child_resume_failed","state":5,"errorType":1,"errorCode":7}"#)])
-        XCTAssertTrue(CaptureFeedback.failure(resumed).contains("复制连接诊断"))
+        XCTAssertTrue(CaptureFeedback.failure(resumed).contains("Command Line Tools"))
         XCTAssertFalse(CaptureFeedback.failure(resumed).contains("开发者工具权限"))
     }
 

@@ -12,7 +12,8 @@ public struct SnapshotBinding: Codable, Sendable {
 
 public enum IndexReader {
     public static func load(snapshot: URL, account: Account, inventory: Inventory,
-                            allowUnboundPreview: Bool = true) throws -> AccountIndex {
+                            allowUnboundPreview: Bool = true, progress: @escaping @Sendable (String) -> Void = { _ in }) throws -> AccountIndex {
+        progress("正在核验索引来源与数据库内容…")
         let base = FileManager.default.fileExists(atPath: snapshot.appendingPathComponent("db_storage").path)
             ? snapshot.appendingPathComponent("db_storage") : snapshot
         let bindingURL = base.appendingPathComponent("source-binding.json")
@@ -31,6 +32,8 @@ public enum IndexReader {
                 }
             }
             for (relative, expected) in decoded.contentHashes {
+                try Task.checkCancellation()
+                progress("正在校验索引内容：\(relative)")
                 let file = try FileSafety.checkedURL(relativePath: relative, root: base)
                 guard try digest(file) == expected else {
                     throw StorageError.invalid("导入的索引内容已变化，无法用于清理。")
@@ -42,6 +45,7 @@ public enum IndexReader {
         guard trusted || allowUnboundPreview else {
             throw StorageError.invalid("外部索引尚未绑定原始数据库，仅允许预览。请使用本地密钥连接微信。")
         }
+        progress("正在读取联系人和图片资源索引…")
         let contactURL = try FileSafety.checkedURL(relativePath: "contact/contact.db", root: base)
         let contactDB = try ReadOnlyDatabase(contactURL)
         try contactDB.require("contact", ["username", "nick_name", "remark"])
@@ -77,37 +81,14 @@ public enum IndexReader {
         for internalID in chatNames where !internalID.isEmpty { _ = conversation(internalID) }
         var warnings = [String]()
         if !trusted { warnings.append("外部索引仅供预览：未核验其与当前微信原始数据库的绑定，清理已锁定。") }
-        let hardlinkDB = try ReadOnlyDatabase(try FileSafety.checkedURL(relativePath: "hardlink/hardlink.db", root: base))
-        try hardlinkDB.require("dir2id", ["username"])
-        try hardlinkDB.require("image_hardlink_info_v4", ["file_name", "dir1", "dir2"])
-        let linkColumns = try hardlinkDB.columns("image_hardlink_info_v4")
-        let typeFilter = linkColumns.contains("type") ? " WHERE h.type=2" : ""
-        let links = try hardlinkDB.query("""
-            SELECT h.file_name, d1.username AS dir1, d2.username AS dir2
-            FROM image_hardlink_info_v4 h JOIN dir2id d1 ON d1.rowid=h.dir1
-            JOIN dir2id d2 ON d2.rowid=h.dir2\(typeFilter)
-            """)
-        var pathsByResource = [String: Set<String>]()
-        var locationsByResource = [String: Set<String>]()
-        let inventoryPaths = Set(inventory.files.map(\.relativePath))
-        for link in links {
-            let hash = link.text("dir1"), month = link.text("dir2"), name = link.text("file_name")
-            guard Scanner.isHash(hash), validMonth(month), name.count >= 32,
-                  Scanner.isHash(String(name.prefix(32)).lowercased()),
-                  !name.contains("/"), name != ".", name != ".." else { continue }
-            let resourceID = String(name.prefix(32)).lowercased()
-            let local = "msg/attach/\(hash)/\(month)/Img/\(name)"
-            let relative = account.relativePath.isEmpty ? local : account.relativePath + "/" + local
-            let key = hash + ":" + resourceID
-            locationsByResource[key, default: []].insert(hash + "/" + month)
-            if inventoryPaths.contains(relative) { pathsByResource[key, default: []].insert(relative) }
-        }
+        let imageResolver = ImageAttachmentResolver(account: account, inventory: inventory)
         var messages = [IndexedMessage]()
         // Resource rows contain explicit per-message identity. Do not choose the first of ambiguous joins.
         let resourceIdentityCounts = Dictionary(grouping: resourceRows) { row in
             "\(row.text("user_name"))|\(row.number("message_local_id"))|\(row.number("message_create_time"))|\(row.text("message_svr_id"))"
         }.mapValues(\.count)
-        for row in resourceRows {
+        for (rowNumber, row) in resourceRows.enumerated() {
+            if rowNumber % 1000 == 0 { progress("正在解析图片消息 \(rowNumber)/\(resourceRows.count)…") }
             try Task.checkCancellation()
             let internalID = row.text("user_name")
             guard !internalID.isEmpty else { continue }
@@ -117,12 +98,8 @@ public enum IndexReader {
             if kind == .image {
                 if resourceIdentityCounts[resourceIdentity] != 1 { resolution = "消息资源存在多个匹配项，已保护" }
                 else if let identifier = imageResourceID(row["packed_info"]?.data ?? Data()) {
-                    let key = chatHash(internalID) + ":" + identifier
-                    if (locationsByResource[key]?.count ?? 0) > 1 { resolution = "存在多个附件位置，已保护" }
-                    else {
-                        paths = (pathsByResource[key] ?? []).sorted()
-                        resolution = paths.isEmpty ? "原文件未在当前扫描范围找到" : "消息资源与图片索引匹配"
-                    }
+                    let resolved = imageResolver.resolve(identifier: identifier, chat: internalID)
+                    paths = resolved.paths; resolution = resolved.reason
                 } else { resolution = "无法识别此消息的图片资源结构，已保护" }
             }
             messages.append(IndexedMessage(id: "\(cid)|resource|\(row.text("message_id"))", conversationID: cid,
@@ -141,10 +118,14 @@ public enum IndexReader {
             messageIndicesByIdentity[key, default: []].append(index)
         }
         for shard in shards.filter({ $0.lastPathComponent.range(of: "^message_[0-9]+\\.db$", options: .regularExpression) != nil }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            progress("正在读取消息分片：\(shard.lastPathComponent)")
             let db = try ReadOnlyDatabase(try FileSafety.checkedURL(relativePath: "message/" + shard.lastPathComponent, root: base))
             guard (try db.columns("Name2Id")).contains("user_name") else { continue }
             let tables = Set(try db.query("SELECT name FROM sqlite_master WHERE type='table'").map { $0.text("name") })
-            for nameRow in try db.query("SELECT user_name FROM Name2Id") {
+            let chatRows = try db.query("SELECT user_name FROM Name2Id")
+            for (chatNumber, nameRow) in chatRows.enumerated() {
+                try Task.checkCancellation()
+                if chatNumber % 20 == 0 { progress("正在解析 \(shard.lastPathComponent)：聊天 \(chatNumber + 1)/\(chatRows.count)，含文件内容校验…") }
                 let username = nameRow.text("user_name")
                 guard !username.isEmpty else { continue }
                 let table = "Msg_" + chatHash(username)
@@ -165,7 +146,27 @@ public enum IndexReader {
                         continue
                     }
                     if existingIndices.count > 1 { continue }
-                    if kind == .image, !existingIndices.isEmpty { continue }
+                    if kind == .image {
+                        // Resource metadata may not describe the locally retained variant.
+                        // Fall back to the explicit image MD5 in this message's XML.
+                        if let index = existingIndices.first {
+                            guard messages[index].kind == .image, messages[index].filePaths.isEmpty,
+                                  messages[index].resolution != "消息资源存在多个匹配项，已保护" else { continue }
+                            if let identifier = MediaResolver.imageIdentifier(raw) {
+                                let resolved = imageResolver.resolve(identifier: identifier, chat: username)
+                                if !resolved.paths.isEmpty {
+                                    messages[index].filePaths = resolved.paths; messages[index].resolution = resolved.reason
+                                }
+                            }
+                        } else {
+                            let resolved = MediaResolver.imageIdentifier(raw).map { imageResolver.resolve(identifier: $0, chat: username) }
+                            messageIndicesByIdentity[identity, default: []].append(messages.count)
+                            messages.append(IndexedMessage(id: "\(cid)|\(shard.lastPathComponent)|\(localID)|\(time)",
+                                conversationID: cid, timestamp: time, localID: localID, kind: kind, summary: "图片消息",
+                                filePaths: resolved?.paths ?? [], resolution: resolved?.reason ?? "尚未识别此消息的图片资源标识"))
+                        }
+                        continue
+                    }
                     let resolved = try MediaResolver.resolve(xml: raw, kind: kind, account: account, inventory: inventory, context: resolverContext)
                     let summary = kind == .text ? String((raw ?? "文字消息（正文未解码）").prefix(120)) : resolved.summary
                     if let index = existingIndices.first {

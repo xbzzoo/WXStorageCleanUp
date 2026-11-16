@@ -12,7 +12,7 @@ struct UnassignedAttachmentsView: View {
                     Spacer()
                     Text("逻辑大小 · 按大小排序").font(.caption).foregroundStyle(.secondary)
                 }
-                Text("已扫描到这些文件，但尚未匹配到具体聊天，可能仍被消息使用。点击附件行可在 Finder 中定位，勾选后可预览清理；清理会将选中路径移入废纸篓，共享硬链接可能仍占用空间。")
+                Text("已扫描到这些文件，但尚未匹配到具体聊天，可能仍被消息使用。点击附件行可在 Finder 中定位，勾选后可清理；清理会将选中路径移入废纸篓，共享硬链接可能仍占用空间。")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 HStack {
                     TextField("搜索文件名或路径", text: $model.unassignedSearch)
@@ -89,7 +89,7 @@ struct UnassignedAttachmentsView: View {
                     Text("已选 \(model.checkedUnassigned.count) 个 · \(SizeText.format(model.selectedUnassignedBytes))")
                         .font(.callout).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
-                    Button("预览清理") { model.previewUnassigned() }.buttonStyle(.borderedProminent)
+                    Button("清理") { model.previewUnassigned() }.buttonStyle(.borderedProminent)
                         .disabled(model.checkedUnassigned.isEmpty || model.busy)
                 }.padding(18)
             }.background(Color.canvas)

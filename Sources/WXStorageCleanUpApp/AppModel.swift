@@ -73,17 +73,19 @@ enum Page: String, CaseIterable, Identifiable {
     private let cleanup: CleanupService
     private var root: URL?
     private var scopedURL: URL?
-    private let connectionStore = AccountConnectionStore()
+    private let connectionStore: AccountConnectionStore
     private var switchingScope = false
+    private var promptConnectionAfterScan = false
     private var selectionScope = AccountSelection()
 
-    init(cleanup: CleanupService = CleanupService()) { self.cleanup = cleanup; records = cleanup.records() }
-    lazy var appVersion: String = {
-        let url = URL(fileURLWithPath: "/Applications/WeChat.app/Contents/Info.plist")
-        guard let data = try? Data(contentsOf: url),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return "未检测到安装版本" }
-        return "微信 " + ((plist["WeChatBundleVersion"] ?? plist["CFBundleShortVersionString"]) as? String ?? "未知版本")
-    }()
+    init(cleanup: CleanupService = CleanupService(), connectionStore: AccountConnectionStore = AccountConnectionStore()) {
+        self.cleanup = cleanup; self.connectionStore = connectionStore; records = cleanup.records()
+    }
+    var appVersion: String {
+        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return "开发版" }
+        return "版本 " + version
+    }
+
     var visibleConversations: [ConversationUsage] {
         let all = (analysis?.conversations ?? []).filter { !removedChatIDs.contains($0.id) && (selectedAccount.isEmpty || $0.conversation.accountID == selectedAccount) }
         guard !search.isEmpty else { return all }
@@ -174,7 +176,16 @@ enum Page: String, CaseIterable, Identifiable {
             self?.connectionStatus[account.id] = "需刷新连接"
             self?.errorMessage = nil
             self?.status = "所选账号的索引已更新，点击自动连接可刷新"
+            self?.presentScanConnectionIfNeeded()
         })
+    }
+
+    private func presentScanConnectionIfNeeded() {
+        guard promptConnectionAfterScan, !busy else { return }
+        promptConnectionAfterScan = false
+        guard !isDemo, !selectedAccount.isEmpty, indexes[selectedAccount] == nil else { return }
+        notice = "扫描完成。请先连接聊天，以显示聊天名称、消息和对应附件。"
+        showingConnection = true
     }
 
     func automaticallyConnect() {
@@ -194,8 +205,8 @@ enum Page: String, CaseIterable, Identifiable {
             self.inventory = result.inventory; indexes[account.id] = result.index; connectionStatus[account.id] = "已连接"
             rebuild(); showingConnection = false; page = .chats
             selectedConversation = analysis?.conversations.first(where: { $0.conversation.accountID == account.id })?.id
-            status = result.reusedKeys ? "已复用本机保存的连接信息" : "已自动获取并验证所选账号索引"
-            notice = "账号 \(account.id) 已连接。微信保持退出，便于你核对附件并预览清理。"
+            status = "正在整理聊天与附件统计…"
+            notice = "账号 \(account.id) 已连接。微信保持退出，便于你核对附件并清理。"
         }, failure: { [weak self] error in
             self?.connectionStatus[account.id] = error is CancellationError ? "已取消" : "未完成"
         })
@@ -258,6 +269,7 @@ enum Page: String, CaseIterable, Identifiable {
 
     func scan(_ url: URL, demo: Bool, preserveIndexes: Bool = false) {
         guard !busy else { return }
+        promptConnectionAfterScan = false
         scopedURL?.stopAccessingSecurityScopedResource()
         if url.startAccessingSecurityScopedResource() { scopedURL = url }
         removedChatIDs = []
@@ -279,9 +291,9 @@ enum Page: String, CaseIterable, Identifiable {
                 selectedAccount = result.accounts.contains(where: { $0.id == saved }) ? (saved ?? "") : (result.accounts.first?.id ?? "")
             } else if !result.accounts.contains(where: { $0.id == selectedAccount }) { selectedAccount = result.accounts.first?.id ?? "" }
             switchingScope = false
+            promptConnectionAfterScan = !demo && !result.accounts.isEmpty
             rebuild(); status = result.complete ? "扫描完成" : "扫描完成，部分范围未读取"
             if !preserveIndexes { page = .overview }
-            if !demo { restoreSelectedConnection() }
         })
     }
 
@@ -338,7 +350,7 @@ enum Page: String, CaseIterable, Identifiable {
         }, success: { [self] index in
             indexes[index.accountID] = index; connectionStatus[index.accountID] = "已连接"; rebuild(); showingConnection = false; page = .chats
             selectedConversation = analysis?.conversations.first(where: { $0.conversation.accountID == selectedAccount })?.id
-            status = "本地索引已连接，可按聊天和消息预览清理"
+            status = "本地索引已连接，可按聊天和消息清理"
         })
     }
 
@@ -489,12 +501,14 @@ enum Page: String, CaseIterable, Identifiable {
                 self.checkedUnassigned.formIntersection(validFiles)
                 self.analysisLoading = false
                 self.busy = false
+                if self.status == "正在整理聊天与附件统计…" { self.status = "所选账号已连接，聊天数据已就绪" }
                 if self.currentConversation == nil {
                     self.selectedConversation = result.conversations.first { $0.conversation.accountID == self.selectedAccount && !self.removedChatIDs.contains($0.id) }?.id
                 }
                 self.refreshVisibleMessages()
                 self.refreshUnassigned()
-                if loadedIndexes.isEmpty && !self.isDemo { self.restoreSelectedConnection() }
+                if !self.isDemo { self.restoreSelectedConnection() }
+                self.presentScanConnectionIfNeeded()
             }
         }
     }

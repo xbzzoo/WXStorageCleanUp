@@ -27,10 +27,12 @@ private final class LayoutCheckWindow: NSWindow {
             if let bytes = bitmap.representation(using: .png, properties: [:]) { try bytes.write(to: imageFixture) }
         }
         let cases: [(String, CGFloat, CGFloat, Bool, Bool, String)] = [
+            ("connection-simple-640", 640, 520, true, false, ""),
             ("image-gallery-900", 900, 650, true, false, ""),
             ("loading-titled-1080", 1080, 700, true, true, ""),
             ("loading-connection-640", 640, 660, true, false, ""),
             ("welcome-1080", 1080, 700, false, false, ""),
+            ("connection-entry-1080", 1080, 700, false, false, ""),
             ("initial-1080", 1080, 700, true, false, ""),
             ("initial-1240", 1240, 800, true, false, ""),
             ("selected-1080", 1080, 700, true, true, ""),
@@ -67,7 +69,7 @@ private final class LayoutCheckWindow: NSWindow {
             }
             model.analysis = Analysis(inventory: model.inventory!, indexes: connected ? indexes : [])
             model.selectedAccount = inventory.accounts.first?.id ?? ""
-            model.page = isUnassigned ? .unassigned : .chats
+            model.page = name == "connection-entry-1080" ? .overview : (isUnassigned ? .unassigned : .chats)
             if isUnassigned { model.unassignedSearch = query }
             else { model.search = query }
             model.notice = "演示模式：所有清理和恢复只操作独立演示目录，不访问真实微信资料。"
@@ -87,7 +89,7 @@ private final class LayoutCheckWindow: NSWindow {
             }
             // Include the actual application shell: navigation, header, banners and footer.
             let contentWidth = width, contentHeight = height
-            let surface = name == "image-gallery-900" ? AnyView(ChatImagesView(root: output, paths: ["preview-image.png"])) : name == "loading-connection-640" ? AnyView(ConnectionView()) : AnyView(MainView())
+            let surface = name == "image-gallery-900" ? AnyView(ChatImagesView(root: output, paths: ["preview-image.png"])) : (name == "loading-connection-640" || name == "connection-simple-640") ? AnyView(ConnectionView()) : AnyView(MainView())
             let view = surface.environmentObject(model).tint(Color.accentGreen)
                 .frame(width: contentWidth, height: contentHeight)
                 .background(Color.canvas)
@@ -162,6 +164,12 @@ private final class LayoutCheckWindow: NSWindow {
                 throw StorageError.invalid("无法保存布局检查图像。")
             }
             try data.write(to: output.appendingPathComponent(name + ".png"))
+            if name == "connection-entry-1080" {
+                try click(NSPoint(x: 810, y: height - 52), in: window)
+                guard model.showingConnection else { throw StorageError.invalid("顶部连接聊天按钮未打开连接面板。") }
+                model.showingConnection = false
+                RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            }
             if name.hasPrefix("navigation") {
                 try click(NSPoint(x: 280, y: height - 34), in: window)
                 guard model.page == .overview else { throw StorageError.invalid("返回空间概览按钮未生效。") }

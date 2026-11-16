@@ -69,7 +69,7 @@ public enum SnapshotService {
         for (index, relative) in databaseNames.enumerated() {
             try Task.checkCancellation()
             guard !processIsRunning() else { throw StorageError.invalid("微信已重新启动，已中止索引快照。") }
-            progress("读取本地索引 \(index + 1)/\(databaseNames.count)")
+            progress("复制本地索引 \(index + 1)/\(databaseNames.count)：\(relative)")
             let sourceLocal = "db_storage/" + relative
             let sourceRelative = account.relativePath.isEmpty ? sourceLocal : account.relativePath + "/" + sourceLocal
             let source = try FileSafety.checkedURL(relativePath: sourceRelative, root: inventory.root)
@@ -95,6 +95,7 @@ public enum SnapshotService {
             try header.close()
             if isPlain {
                 // Use SQLite's backup API so an existing WAL is included, never copy only the main DB.
+                progress("创建只读索引 \(index + 1)/\(databaseNames.count)：\(relative)")
                 try copyPlainDatabase(source: destinationDB, destination: outputDB)
             } else {
                 guard let key = matchingKey(keys, relative: relative, allPaths: databaseNames) else {
@@ -111,10 +112,17 @@ public enum SnapshotService {
                 DETACH DATABASE plaintext;
                 .quit
                 """
-                try runSQLCipher(executable: executable, database: destinationDB, script: script)
+                progress("解锁本地索引 \(index + 1)/\(databaseNames.count)：\(relative)")
+                do {
+                    try runSQLCipher(executable: executable, database: destinationDB, script: script, outputDatabase: outputDB, progress: { bytes in
+                        progress("解锁本地索引 \(index + 1)/\(databaseNames.count)：\(relative)，已生成 \(SizeText.format(bytes))")
+                    })
+                } catch is CancellationError { throw CancellationError() }
+                catch { throw StorageError.invalid("解锁 \(relative) 未完成：\(error.localizedDescription)") }
             }
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: outputDB.path)
             _ = try ReadOnlyDatabase(outputDB)
+            progress("校验只读索引 \(index + 1)/\(databaseNames.count)：\(relative)")
             hashes[relative] = try IndexReader.digest(outputDB)
         }
         for (relative, expected) in identities {
@@ -176,28 +184,41 @@ public enum SnapshotService {
         return nil
     }
 
-    static func runSQLCipher(executable: URL, database: URL, script: String) throws {
-        let process = Process(), input = Pipe(), error = Pipe()
+    static func runSQLCipher(executable: URL, database: URL, script: String, timeout: TimeInterval = 300, outputDatabase: URL? = nil, progress: @Sendable (Int64) -> Void = { _ in }) throws {
+        let process = Process(), input = Pipe()
         process.executableURL = executable
         process.arguments = [database.path]
         process.standardInput = input
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = error
+        process.standardError = FileHandle.nullDevice
         var environment = ProcessInfo.processInfo.environment
         environment["SQLITE_HISTORY"] = "/dev/null"
         process.environment = environment
         try process.run()
         input.fileHandleForWriting.write(Data(script.utf8))
         try input.fileHandleForWriting.close()
-        // The script emits bounded errors; drain stderr concurrently to avoid a full pipe.
-        let drain = DispatchGroup()
-        drain.enter()
-        DispatchQueue.global(qos: .utility).async { _ = error.fileHandleForReading.readDataToEndOfFile(); drain.leave() }
+        let started = ProcessInfo.processInfo.systemUptime
+        var stoppingAt: TimeInterval?, cancelled = false
+        var lastActivity = started, lastReport = started, previousBytes: Int64 = -1
         while process.isRunning {
-            if Task.isCancelled { process.terminate(); process.waitUntilExit(); drain.wait(); throw CancellationError() }
+            let now = ProcessInfo.processInfo.systemUptime
+            if let outputDatabase, now - lastReport >= min(2, max(0.05, timeout / 4)) {
+                var metadata = stat()
+                let bytes = stat(outputDatabase.path, &metadata) == 0 ? Int64(metadata.st_size) : 0
+                if bytes > previousBytes { lastActivity = now; previousBytes = bytes }
+                progress(bytes); lastReport = now
+            }
+            if Task.isCancelled || now - lastActivity > timeout || now - started > max(3600, timeout) {
+                if stoppingAt == nil {
+                    cancelled = Task.isCancelled
+                    process.terminate(); stoppingAt = now
+                } else if now - stoppingAt! > 15 { kill(process.processIdentifier, SIGKILL) }
+            }
             Thread.sleep(forTimeInterval: 0.05)
         }
-        process.waitUntilExit(); drain.wait()
+        process.waitUntilExit()
+        if cancelled { throw CancellationError() }
+        if stoppingAt != nil { throw StorageError.invalid("索引解锁长时间无输出进展或超出时限，已停止本工具启动的 SQLCipher。请检查当前数据库状态后重试。") }
         guard process.terminationStatus == 0 else {
             throw StorageError.invalid("索引解锁失败：密钥、SQLCipher 参数或数据库快照不匹配。未修改微信数据。")
         }

@@ -26,17 +26,17 @@ enum CaptureFeedback {
         let event = result.events.last { ["error", "incomplete"].contains($0.event) }
         switch event?.code {
         case "debug_launch_denied":
-            return "无法启动调试连接窗口。请检查开发者工具权限及 Xcode / Command Line Tools 安装，并复制连接诊断以确认具体原因。"
+            return "无法启动调试连接窗口。请检查开发者工具权限及 Xcode / Command Line Tools 安装，并核对下方错误信息。"
         case "unsupported_target_architecture":
             return "当前微信程序架构不受支持；自动连接支持 arm64 和 x86_64。"
         case "breakpoint_unavailable":
-            return "无法设置本地取钥观察点，当前开发工具或微信版本可能不兼容。请查看本地密钥与排查指引。"
+            return "无法设置本地取钥观察点，当前开发工具或微信版本可能不兼容。请核对开发工具与微信版本后重试。"
         case "breakpoint_unresolved":
-            return "当前开发工具未能解析微信取钥观察点，账号尚未连接。请复制连接诊断，检查 Command Line Tools 是否适配当前 macOS；打开更多聊天无法解决观察点未解析的问题。"
+            return "当前开发工具未能解析微信取钥观察点，账号尚未连接。请检查 Command Line Tools 是否适配当前 macOS；打开更多聊天无法解决观察点未解析的问题。"
         case "child_resume_failed":
-            return "调试组件未能恢复临时微信，账号尚未连接。请点击「复制连接诊断」提供调试状态和版本信息，以定位兼容问题。错误代码：child_resume_failed。"
+            return "调试组件未能恢复临时微信，账号尚未连接。请检查 Command Line Tools 与当前 macOS 的兼容性后重试。错误代码：child_resume_failed。"
         case "debug_resume_denied":
-            return "系统在恢复临时微信时报告权限拒绝。请检查开发者工具权限，并点击「复制连接诊断」保留具体错误代码。"
+            return "系统在恢复临时微信时报告权限拒绝。请检查开发者工具权限，并核对系统的开发者工具授权提示。"
         default: break
         }
         let last = result.events.last { $0.verified != nil }
@@ -45,12 +45,12 @@ enum CaptureFeedback {
         switch event?.code {
         case "child_crashed": reason = "临时微信意外中断。"
         case "child_exited": reason = "临时微信在取齐密钥前退出。"
-        case "capture_failed": reason = "本地连接组件发生错误，账号尚未连接。请复制连接诊断。"
+        case "capture_failed": reason = "本地连接组件发生错误，账号尚未连接。请检查开发工具安装后重试。"
         default: reason = "本轮等待已结束；微信登录成功后，还需要加载所选账号的数据库才能继续连接。"
         }
         let pending = last?.pending?.joined(separator: "、") ?? ""
         let next = verified == 0
-            ? "请确认临时微信登录的是所选账号。若打开联系人和历史聊天后仍为 0，可能是微信版本或调试环境不兼容，可查看本地密钥与排查指引。"
+            ? "请确认临时微信登录的是所选账号。若打开联系人和历史聊天后仍为 0，可能是微信版本或调试环境不兼容，请核对开发工具与微信版本后重试。"
             : "已验证的密钥保存在本机。可再次自动连接，并打开联系人、聊天图片及较早的历史消息，继续补齐剩余密钥。"
         return "\(reason)已验证 \(verified)/\(total) 个加密索引。\n\(next)" +
             (pending.isEmpty ? "" : "\n尚缺：\(pending)")
@@ -127,7 +127,7 @@ public struct AutomaticConnection: Sendable {
         progress(.init(phase: "正在检查所选账号的本地连接信息…", verified: 0, total: names.count))
         let readiness = try LocalCommand.run("/usr/bin/python3", baseArguments + ["--verify-only"])
         guard readiness.status == 0 || readiness.status == 3 else {
-            throw StorageError.invalid("该账号的本地连接缓存无法验证，请忘记此账号连接后重试。")
+            throw StorageError.invalid("该账号的本地连接缓存无法验证，请确认选择的是当前使用的微信数据目录和账号。")
         }
         let reused = readiness.status == 0
         if !reused {
@@ -201,12 +201,16 @@ public struct AutomaticConnection: Sendable {
         }
         try Task.checkCancellation()
         progress(.init(phase: "正在刷新账号数据并建立只读索引…", verified: names.count, total: names.count))
-        let fresh = try Scanner.scan(root: inventory.root, application: application)
+        let fresh = try Scanner.scan(root: inventory.root, application: application, progress: { scan in
+            progress(.init(phase: "正在刷新账号附件清单：\(scan.count) 个文件…", verified: names.count, total: names.count))
+        })
         guard let freshAccount = fresh.accounts.first(where: { $0.id == account.id }) else { throw StorageError.invalid("连接后未找到所选账号，请重新扫描。") }
         let snapshot = try SnapshotService.create(account: freshAccount, inventory: fresh, keyFile: keys, progress: { text in
             progress(.init(phase: text, verified: names.count, total: names.count))
         })
-        let index = try IndexReader.load(snapshot: snapshot, account: freshAccount, inventory: fresh)
+        let index = try IndexReader.load(snapshot: snapshot, account: freshAccount, inventory: fresh, progress: { text in
+            progress(.init(phase: text, verified: names.count, total: names.count))
+        })
         try store.save(accountID: account.id, root: fresh.root, snapshot: snapshot)
         progress(.init(phase: "所选账号已连接", verified: names.count, total: names.count))
         return AutomaticConnectionResult(inventory: fresh, index: index, reusedKeys: reused)

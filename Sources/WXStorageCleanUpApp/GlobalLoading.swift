@@ -5,6 +5,7 @@ import AppKit
 /// remains interactive while a scan, connection or its analysis is running.
 struct GlobalLoading: ViewModifier {
     @EnvironmentObject var model: AppModel
+    @State private var startedAt = Date()
     func body(content: Content) -> some View {
         content
             .disabled(model.busy)
@@ -19,6 +20,10 @@ struct GlobalLoading: ViewModifier {
                             Text("正在处理，请稍候").font(.headline)
                             Text(model.status).font(.callout).multilineTextAlignment(.center)
                                 .fixedSize(horizontal: false, vertical: true)
+                            TimelineView(.periodic(from: .now, by: 1)) { context in
+                                Text("已等待 \(max(0, Int(context.date.timeIntervalSince(startedAt)))) 秒")
+                                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            }
                             Text("完成后将自动恢复操作").font(.caption).foregroundStyle(.secondary)
                         }
                         .padding(28).frame(maxWidth: 440)
@@ -27,7 +32,7 @@ struct GlobalLoading: ViewModifier {
                         .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("global-loading")
                     }
-                    .onAppear { NSApp.keyWindow?.makeFirstResponder(nil) }
+                    .onAppear { startedAt = Date(); NSApp.keyWindow?.makeFirstResponder(nil) }
                 }
             }
             .background(WindowLoadingLock(locked: model.busy))
