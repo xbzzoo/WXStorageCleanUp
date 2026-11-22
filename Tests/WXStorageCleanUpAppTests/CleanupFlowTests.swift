@@ -13,8 +13,6 @@ import WXStorageCleanUpCore
         let model = AppModel()
         model.busy = true
         model.pickRoot()
-        model.importSnapshot()
-        model.importKeys()
         model.exportAnalysis()
         model.openConnectionGuide()
         model.copyConnectionDiagnostics()
@@ -110,11 +108,12 @@ import WXStorageCleanUpCore
             XCTAssertEqual(model.inventory?.scannedAt, scannedAt)
             XCTAssertEqual(model.page, .chats)
             XCTAssertNotNil(model.currentConversation)
-            XCTAssertTrue(model.checkedMessages.isEmpty)
-            XCTAssertTrue(model.checkedConversations.isEmpty)
+            XCTAssertTrue(model.checkedUnassigned.isEmpty)
             XCTAssertNil(model.plan)
             XCTAssertEqual(model.cleanupCompletion?.trashedCount, model.records.first?.trashedCount)
             XCTAssertTrue(model.cleanupCompletionMessage.contains("清空废纸篓"))
+            let name = try XCTUnwrap(model.analysis?.conversations.first { $0.conversation.internalID == internalID }?.conversation.name)
+            XCTAssertTrue(model.cleanupCompletionMessage.contains("在「\(name)」的聊天信息中清空聊天记录"))
             model.cleanupCompletion = nil
         }
         XCTAssertEqual(model.records.count, 2)
@@ -154,6 +153,7 @@ import WXStorageCleanUpCore
         XCTAssertEqual(model.cleanupCompletion?.trashedCount, 1)
         XCTAssertTrue(model.cleanupCompletionMessage.contains("清空废纸篓"))
         XCTAssertTrue(model.cleanupCompletionMessage.contains("其他硬链接"))
+        XCTAssertFalse(model.cleanupCompletionMessage.contains("清空聊天记录"))
         model.cleanupCompletion = nil
         let record = try XCTUnwrap(model.records.first)
         XCTAssertEqual(try service.restore(record, processIsRunning: { false }).restoredCount, 1)
@@ -161,6 +161,63 @@ import WXStorageCleanUpCore
         try await waitUntilIdle(model)
         XCTAssertEqual(model.page, .unassigned)
         XCTAssertEqual(model.accountUnassigned.count, initialCount)
+    }
+    func testLegacyBrowseCleanUpdatesInPlace() async throws {
+        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("LegacyFlowTests-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let demo = try DemoFactory.create(parent: temporary, includeLegacy: true)
+        let model = AppModel(cleanup: CleanupService(journalDirectory: temporary.appendingPathComponent("journal")))
+        model.scan(demo.root, demo: true)
+        try await waitUntilIdle(model)
+        // The tree is computed off the main thread with the overview breakdown.
+        let deadline = Date().addingTimeInterval(10)
+        while model.legacy.root == nil && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        let root = try XCTUnwrap(model.legacy.root)
+        XCTAssertEqual(model.legacyOccupied, root.allocatedBytes)
+        model.open(.legacy)
+        XCTAssertEqual(model.page, .legacy)
+
+        // Browse: top level → version folder → legacy account folder.
+        let version = try XCTUnwrap(model.visibleLegacy.first)
+        XCTAssertFalse(version.cleanable)
+        model.openLegacy(version)
+        XCTAssertEqual(model.legacyCurrent?.id, version.id)
+        let account = try XCTUnwrap(model.visibleLegacy.first { $0.cleanable })
+        let other = try XCTUnwrap(model.visibleLegacy.first { !$0.cleanable })
+        model.openLegacy(account)
+        XCTAssertEqual(model.legacyTrail.map(\.id), [root.id, version.id, account.id])
+
+        // Selecting a folder covers what is inside it.
+        let child = try XCTUnwrap(model.visibleLegacy.first)
+        model.setLegacy(child.id, checked: true)
+        model.setLegacy(account.id, checked: true)
+        XCTAssertEqual(model.checkedLegacy, [account.id])
+        XCTAssertTrue(model.legacyCovered(child.id))
+        XCTAssertEqual(model.selectedLegacyBytes, account.allocatedBytes)
+
+        let scannedAt = model.inventory?.scannedAt
+        model.previewLegacy()
+        try await waitUntilIdle(model)
+        XCTAssertEqual(model.plan?.scope, .legacyData)
+        XCTAssertEqual(model.plan?.candidates.map(\.relativePath), [account.id])
+        let trash = temporary.appendingPathComponent("trash")
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        model.executePlan(trash: { source in
+            let target = trash.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.moveItem(at: source, to: target); return target
+        })
+        try await waitUntilIdle(model)
+        while model.legacy.node(account.id) != nil && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(model.inventory?.scannedAt, scannedAt, "updated in place, not rescanned")
+        XCTAssertNil(model.legacy.node(account.id))
+        XCTAssertEqual(model.legacyCurrent?.id, version.id, "browsing moves up to the nearest folder that still exists")
+        XCTAssertEqual(model.visibleLegacy.map(\.id), [other.id])
+        XCTAssertTrue(model.checkedLegacy.isEmpty)
+        XCTAssertEqual(model.page, .legacy)
+        XCTAssertEqual(model.records.first?.scope, .legacyData)
+        XCTAssertTrue(model.cleanupCompletionMessage.contains("1 个项目"))
+        XCTAssertFalse(model.cleanupCompletionMessage.contains("清空聊天记录"))
     }
     func testUnassignedFiltersSelectionAndAccountSwitch() async throws {
         let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()

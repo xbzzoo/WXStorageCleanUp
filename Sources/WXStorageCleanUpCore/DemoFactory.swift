@@ -15,8 +15,9 @@ public struct MultiAccountDemo: Sendable {
 
 public enum DemoFactory {
     public static func createMultiple(parent: URL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/WeChatStorage/Demo"), nameSuffix: String = "", includeUnassigned: Bool = false) throws -> MultiAccountDemo {
-        let first = try create(parent: parent, nameSuffix: nameSuffix, includeUnassigned: includeUnassigned)
+        .appendingPathComponent("Library/Application Support/WeChatStorage/Demo"), nameSuffix: String = "", includeUnassigned: Bool = false,
+        includeLegacy: Bool = false) throws -> MultiAccountDemo {
+        let first = try create(parent: parent, nameSuffix: nameSuffix, includeUnassigned: includeUnassigned, includeLegacy: includeLegacy)
         let accountID = "demo_second_account"
         let relative = "Documents/xwechat_files/" + accountID
         let account = first.root.appendingPathComponent(relative)
@@ -41,7 +42,8 @@ public enum DemoFactory {
     }
 
     public static func create(parent: URL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/WeChatStorage/Demo"), nameSuffix: String = "", includeUnassigned: Bool = false) throws -> DemoEnvironment {
+        .appendingPathComponent("Library/Application Support/WeChatStorage/Demo"), nameSuffix: String = "", includeUnassigned: Bool = false,
+        includeLegacy: Bool = false) throws -> DemoEnvironment {
         let folder = parent.appendingPathComponent(UUID().uuidString)
         let root = folder.appendingPathComponent("Data")
         let accountID = "demo_account", accountRelative = "Documents/xwechat_files/" + accountID
@@ -128,6 +130,23 @@ public enum DemoFactory {
             try Data(repeating: 0x44, count: 180_000).write(to: document)
             if let firstImage {
                 try FileManager.default.linkItem(at: firstImage, to: video.deletingLastPathComponent().appendingPathComponent("共享演示附件.mp4"))
+            }
+        }
+        if includeLegacy {
+            // An old-client account folder that maps to no current account, plus one file outside any account folder.
+            let version = LegacyLayout.prefix + "2.0b4.0.9/"
+            let legacyAccount = version + chatHash("wxid_demo_legacy") + "/"
+            let chat = legacyAccount + "Message/MessageTemp/" + chatHash("wxid_demo_old_friend") + "/"
+            let files: [(String, Int)] = [
+                (legacyAccount + "Message/msg_0.db", 420_000), (legacyAccount + "Message/msg_1.db", 260_000),
+                (chat + "Image/1_.pic.jpg", 210_000), (chat + "Video/2.mp4", 380_000), (chat + "Audio/3.aud.silk", 24_000),
+                (legacyAccount + "Favorites/fav.db", 90_000), (legacyAccount + "Stickers/sticker.gif", 45_000),
+                (version + "topinfo.data", 6_000),
+            ]
+            for (path, size) in files {
+                let url = root.appendingPathComponent(path)
+                try FileSafety.privateDirectory(url.deletingLastPathComponent())
+                try Data(repeating: 0x4c, count: size).write(to: url)
             }
         }
         let cache = root.appendingPathComponent("Documents/app_data/log/demo.log")

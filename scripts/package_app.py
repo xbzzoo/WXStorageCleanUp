@@ -14,7 +14,7 @@ from build_dependencies import main as build_dependencies
 
 PROJECT = Path(__file__).resolve().parents[1]
 OUTPUT = PROJECT / "build"
-VERSION = "0.3.14"
+VERSION = "0.3.16"
 
 
 def run(*args, capture=False):
@@ -56,7 +56,7 @@ def main(architecture=None):
         "CFBundleDevelopmentRegion": "zh_CN", "CFBundleExecutable": "微空间",
         "CFBundleIdentifier": "local.wxstoragecleanup.app", "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleName": "微空间", "CFBundleDisplayName": "微空间", "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "22", "LSMinimumSystemVersion": "14.0",
+        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "24", "LSMinimumSystemVersion": "14.0",
         "CFBundleIconFile": "AppIcon.icns",
         "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
         "LSApplicationCategoryType": "public.app-category.utilities",

@@ -12,7 +12,7 @@ private final class LayoutCheckWindow: NSWindow {
     static func run(output: URL) throws {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let demo = try DemoFactory.createMultiple(parent: output.appendingPathComponent("fixtures"),
-            nameSuffix: " · 产品研发设计与运营联合讨论群 / VeryLongConversationNameForLayout", includeUnassigned: true)
+            nameSuffix: " · 产品研发设计与运营联合讨论群 / VeryLongConversationNameForLayout", includeUnassigned: true, includeLegacy: true)
         let inventory = try Scanner.scan(root: URL(fileURLWithPath: demo.root.path, isDirectory: true))
         let indexes = try inventory.accounts.map { account in
             try IndexReader.load(snapshot: demo.snapshots[account.id]!, account: account, inventory: inventory)
@@ -50,7 +50,12 @@ private final class LayoutCheckWindow: NSWindow {
             ("unassigned-shared-interaction-1080", 1080, 700, true, false, "共享演示附件"),
             ("navigation-roundtrip-1080", 1080, 700, true, false, ""),
             ("after-cleanup-next-1080", 1080, 700, true, true, ""),
-            ("after-cleanup-empty-1080", 1080, 700, true, true, "")
+            ("after-cleanup-empty-1080", 1080, 700, true, true, ""),
+            ("legacy-1080", 1080, 700, true, false, ""),
+            ("legacy-account-1240", 1240, 800, true, false, ""),
+            ("legacy-plan-700", 700, 720, true, false, ""),
+            ("overview-1080", 1080, 700, true, true, ""),
+            ("overview-1440", 1440, 900, true, true, "")
         ]
         var results = [[String: Any]]()
         for (name, width, height, connected, selected, query) in cases {
@@ -69,7 +74,10 @@ private final class LayoutCheckWindow: NSWindow {
             }
             model.analysis = Analysis(inventory: model.inventory!, indexes: connected ? indexes : [])
             model.selectedAccount = inventory.accounts.first?.id ?? ""
-            model.page = name == "connection-entry-1080" ? .overview : (isUnassigned ? .unassigned : .chats)
+            model.page = name == "connection-entry-1080" || name.hasPrefix("overview") ? .overview : (isUnassigned ? .unassigned : .chats)
+            let legacyAccount = LegacyLayout.prefix + "2.0b4.0.9/" + chatHash("wxid_demo_legacy")
+            if name.hasPrefix("legacy") { model.page = .legacy }
+            if name.hasPrefix("legacy-account") { model.legacyFolder = legacyAccount; model.checkedLegacy = [legacyAccount + "/Message"] }
             if isUnassigned { model.unassignedSearch = query }
             else { model.search = query }
             model.notice = "演示模式：所有清理和恢复只操作独立演示目录，不访问真实微信资料。"
@@ -89,7 +97,7 @@ private final class LayoutCheckWindow: NSWindow {
             }
             // Include the actual application shell: navigation, header, banners and footer.
             let contentWidth = width, contentHeight = height
-            let surface = name == "image-gallery-900" ? AnyView(ChatImagesView(root: output, paths: ["preview-image.png"])) : (name == "loading-connection-640" || name == "connection-simple-640") ? AnyView(ConnectionView()) : AnyView(MainView())
+            let surface = name == "image-gallery-900" ? AnyView(ChatImagesView(root: output, paths: ["preview-image.png"])) : (name == "loading-connection-640" || name == "connection-simple-640") ? AnyView(ConnectionView()) : name == "legacy-plan-700" ? AnyView(PlanView(plan: try CleanupPlanner.planLegacy(analysis: model.analysis!, relativePaths: [legacyAccount]))) : AnyView(MainView())
             let view = surface.environmentObject(model).tint(Color.accentGreen)
                 .frame(width: contentWidth, height: contentHeight)
                 .background(Color.canvas)
@@ -132,7 +140,6 @@ private final class LayoutCheckWindow: NSWindow {
                 guard model.cleanupCompletion == nil else { throw StorageError.invalid("清理完成提示无法关闭。") }
                 model.selectedConversation = model.visibleConversations.first { $0.conversation.internalID == "filehelper" }?.id
                 guard model.canCleanCurrentConversation else { throw StorageError.invalid("清理后切换聊天无法再次清理。") }
-                model.checkedMessages = Set(model.visibleMessages.filter { !$0.filePaths.isEmpty }.map(\.id))
             }
             RunLoop.main.run(until: Date().addingTimeInterval(0.7))
             if name.contains("shared-interaction") {
@@ -149,7 +156,8 @@ private final class LayoutCheckWindow: NSWindow {
             }
             if name.hasPrefix("chat-interaction") {
                 let first = model.visibleConversations[0].id
-                try click(NSPoint(x: 365, y: height - 292), in: window)
+                // First chat row, below the chats summary bar.
+                try click(NSPoint(x: 365, y: height - 368), in: window)
                 guard model.selectedConversation == first else { throw StorageError.invalid("聊天行点击未生效。") }
             }
             hosting.layoutSubtreeIfNeeded()

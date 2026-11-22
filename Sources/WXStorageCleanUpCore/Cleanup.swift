@@ -24,7 +24,9 @@ public struct DirectoryIdentity: Codable, Equatable, Sendable {
 }
 
 public enum CleanupScope: String, Codable, Sendable {
-    case messages, unassignedAttachments, conversationAttachments
+    /// Only in journals written by earlier versions (message-level cleanup); kept so their history still decodes.
+    case messages
+    case unassignedAttachments, conversationAttachments, legacyData
 }
 
 public struct CleanupPlan: Identifiable, Sendable {
@@ -33,12 +35,10 @@ public struct CleanupPlan: Identifiable, Sendable {
     public let sourceFiles: [String: FileIdentity]
     public let candidates: [CleanupCandidate]
     public let skipped: [String]
-    public let selectedMessages: Int
     public let accountIDs: [String]
     public let createdAt: Date
     public let scope: CleanupScope
     public var conversationID: String? = nil
-    public var includesOtherReferences = false
     public var logicalBytes: Int64 { candidates.reduce(0) { $0 + ($1.contentBytes ?? $1.expectedIdentity.bytes) } }
     public var allocatedBytes: Int64 {
         var seen = Set<String>()
@@ -48,57 +48,6 @@ public struct CleanupPlan: Identifiable, Sendable {
 }
 
 public enum CleanupPlanner {
-    public static func plan(analysis: Analysis, conversationIDs: Set<String> = [], messageIDs: Set<String> = [],
-                            allowedAccountID: String? = nil, includeOtherReferences: Bool = false) throws -> CleanupPlan {
-        guard analysis.inventory.complete else {
-            throw StorageError.invalid("扫描存在未读取的目录，无法验证引用范围。请解决授权问题后重新扫描。")
-        }
-        let selected = analysis.messages.filter { conversationIDs.contains($0.conversationID) || messageIDs.contains($0.id) }
-        let selectedIDs = Set(selected.map(\.id))
-        guard !selected.isEmpty else { throw StorageError.invalid("请选择聊天或已建立附件映射的消息。") }
-        var wanted = Set(selected.flatMap(\.filePaths))
-        let files = Dictionary(uniqueKeysWithValues: analysis.inventory.files.map { ($0.relativePath, $0) })
-        let selectedChats = Set(selected.map(\.conversationID))
-        let accountIDs = Set(analysis.conversations.filter { selectedChats.contains($0.id) }.map { $0.conversation.accountID })
-        if let allowedAccountID, accountIDs != [allowedAccountID] {
-            throw StorageError.invalid("清理选择包含其他账号，请重新选择当前账号内的聊天或消息。")
-        }
-        guard accountIDs.isDisjoint(with: analysis.inventory.blockedAccountIDs) else {
-            throw StorageError.invalid("所选账号内存在未扫描的目录链接，无法验证完整归属，清理已锁定。")
-        }
-        var sourceFiles = [String: FileIdentity]()
-        for index in analysis.indexes where accountIDs.contains(index.accountID) {
-            guard index.trustedBinding else { throw StorageError.invalid("该账号的外部索引仅供预览，请先用本地密钥连接当前微信索引。") }
-            sourceFiles.merge(index.sourceFiles) { first, _ in first }
-        }
-        if includeOtherReferences {
-            let physicalIDs = Set(wanted.compactMap { files[$0]?.identity.physicalID })
-            for file in analysis.inventory.files where file.category == .attachment &&
-                file.accountID.map({ accountIDs.contains($0) }) == true && physicalIDs.contains(file.identity.physicalID) {
-                wanted.insert(file.relativePath)
-            }
-        }
-        var candidates = [CleanupCandidate](), skipped = [String]()
-        let unresolved = selected.filter { $0.kind != .text && $0.filePaths.isEmpty }.count
-        if unresolved > 0 { skipped.append("\(unresolved) 条消息没有唯一的本地附件映射，已保护。") }
-        for path in wanted.sorted() {
-            guard let file = files[path], file.category == .attachment else {
-                skipped.append("有项目不属于可处理的聊天附件范围。"); continue
-            }
-            guard includeOtherReferences || (analysis.references[path]?.isSubset(of: selectedIDs) == true) else {
-                skipped.append("\(file.name)：还有未选中的消息引用，已保护。"); continue
-            }
-            let url = try FileSafety.checkedURL(relativePath: path, root: analysis.inventory.root)
-            guard try FileSafety.identity(url) == file.identity else {
-                skipped.append("\(file.name)：文件已变化，请重新扫描。"); continue
-            }
-            candidates.append(CleanupCandidate(relativePath: path, expectedIdentity: file.identity,
-                parentIdentity: try DirectoryIdentity(url: url.deletingLastPathComponent()), allocatedBytes: file.allocatedBytes))
-        }
-        return CleanupPlan(id: UUID(), root: analysis.inventory.root, sourceFiles: sourceFiles,
-            candidates: candidates, skipped: skipped, selectedMessages: selected.count, accountIDs: accountIDs.sorted(), createdAt: Date(), scope: .messages, includesOtherReferences: includeOtherReferences)
-    }
-
     /// The exact same paths and logical bytes displayed in ConversationUsage.
     public static func planConversation(analysis: Analysis, conversationID: String, accountID: String) throws -> CleanupPlan {
         guard analysis.inventory.complete, !analysis.inventory.blockedAccountIDs.contains(accountID) else {
@@ -116,10 +65,14 @@ public enum CleanupPlanner {
         var candidates = [CleanupCandidate]()
         guard let account = analysis.inventory.accounts.first(where: { $0.id == accountID }) else { throw StorageError.invalid("当前账号不存在。") }
         let base = account.relativePath.isEmpty ? "msg/attach/" : account.relativePath + "/msg/attach/"
-        var folder: String?
+        var folders = [String]()
         if Scanner.isHash(chat.conversation.directoryHash) {
-            let path = base + chat.conversation.directoryHash
-            if FileManager.default.fileExists(atPath: analysis.inventory.root.appendingPathComponent(path).path) {
+            let hash = chat.conversation.directoryHash
+            // The current chat folder, plus any legacy-client MessageTemp folders merged into this chat.
+            let legacy = Set(chat.filePaths.compactMap(LegacyLayout.chatFolder(containing:)))
+                .filter { ($0 as NSString).lastPathComponent == hash }
+            for path in [base + hash] + legacy.sorted()
+            where FileManager.default.fileExists(atPath: analysis.inventory.root.appendingPathComponent(path).path) {
                 let url = try FileSafety.checkedURL(relativePath: path, root: analysis.inventory.root)
                 let contained = analysis.inventory.files.filter { $0.relativePath.hasPrefix(path + "/") }
                 guard contained.allSatisfy({ $0.accountID == accountID && $0.category == .attachment }) else {
@@ -129,11 +82,11 @@ public enum CleanupPlanner {
                     parentIdentity: try DirectoryIdentity(url: url.deletingLastPathComponent()),
                     allocatedBytes: contained.reduce(0) { $0 + $1.allocatedBytes }, isDirectory: true,
                     contentBytes: contained.reduce(0) { $0 + $1.identity.bytes }))
-                folder = path
+                folders.append(path)
             }
         }
         for path in chat.filePaths.sorted() {
-            if let folder, path.hasPrefix(folder + "/") { continue }
+            if folders.contains(where: { path.hasPrefix($0 + "/") }) { continue }
             try Task.checkCancellation()
             guard let file = files[path], file.accountID == accountID, file.category == .attachment else {
                 throw StorageError.invalid("聊天附件范围不一致，请重新扫描。")
@@ -146,7 +99,7 @@ public enum CleanupPlanner {
                 parentIdentity: try DirectoryIdentity(url: url.deletingLastPathComponent()), allocatedBytes: file.allocatedBytes))
         }
         return CleanupPlan(id: UUID(), root: analysis.inventory.root, sourceFiles: sources,
-            candidates: candidates, skipped: [], selectedMessages: chat.messageCount, accountIDs: [accountID],
+            candidates: candidates, skipped: [], accountIDs: [accountID],
             createdAt: Date(), scope: .conversationAttachments, conversationID: conversationID)
     }
 
@@ -178,8 +131,41 @@ public enum CleanupPlanner {
                 parentIdentity: try DirectoryIdentity(url: url.deletingLastPathComponent()), allocatedBytes: file.allocatedBytes))
         }
         return CleanupPlan(id: UUID(), root: analysis.inventory.root, sourceFiles: sourceFiles,
-            candidates: candidates, skipped: skipped, selectedMessages: 0, accountIDs: [accountID],
+            candidates: candidates, skipped: skipped, accountIDs: [accountID],
             createdAt: Date(), scope: .unassignedAttachments)
+    }
+
+    /// Explicitly selected legacy folders and files. A folder that also holds legacy media merged into chats is
+    /// split into its legacy-only parts, so those chat files stay in place.
+    public static func planLegacy(analysis: Analysis, relativePaths: Set<String>) throws -> CleanupPlan {
+        guard analysis.inventory.complete else { throw StorageError.invalid("扫描存在未读取的目录，请解决授权问题后重新扫描。") }
+        guard !relativePaths.isEmpty else { throw StorageError.invalid("请选择要清理的历史版本数据。") }
+        let legacy = analysis.legacyData()
+        let selected = try relativePaths.sorted().compactMap { path -> LegacyNode? in
+            guard let node = legacy.node(path), node.cleanable else {
+                throw StorageError.invalid("选择包含不可清理或已变化的项目，请重新扫描并选择。")
+            }
+            // A selected folder already covers everything inside it.
+            return relativePaths.contains { path.hasPrefix($0 + "/") } ? nil : node
+        }
+        let files = Dictionary(uniqueKeysWithValues: analysis.inventory.files.map { ($0.relativePath, $0) })
+        var candidates = [CleanupCandidate](), skipped = [String]()
+        func add(_ node: LegacyNode) throws {
+            try Task.checkCancellation()
+            if node.mixed { try node.children.forEach(add); return }
+            let url = try FileSafety.checkedURL(relativePath: node.id, root: analysis.inventory.root)
+            let parent = try DirectoryIdentity(url: url.deletingLastPathComponent())
+            if node.isDirectory {
+                candidates.append(CleanupCandidate(relativePath: node.id, expectedIdentity: try directoryFileIdentity(url),
+                    parentIdentity: parent, allocatedBytes: node.allocatedBytes, isDirectory: true, contentBytes: node.logicalBytes))
+            } else if let file = files[node.id], try FileSafety.identity(url) == file.identity {
+                candidates.append(CleanupCandidate(relativePath: node.id, expectedIdentity: file.identity,
+                    parentIdentity: parent, allocatedBytes: node.allocatedBytes))
+            } else { skipped.append("\(node.name)：文件已变化，请重新扫描。") }
+        }
+        try selected.forEach(add)
+        return CleanupPlan(id: UUID(), root: analysis.inventory.root, sourceFiles: [:], candidates: candidates,
+            skipped: skipped, accountIDs: [], createdAt: Date(), scope: .legacyData)
     }
 }
 

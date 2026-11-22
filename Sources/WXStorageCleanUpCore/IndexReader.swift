@@ -11,8 +11,10 @@ public struct SnapshotBinding: Codable, Sendable {
 }
 
 public enum IndexReader {
+    /// `digestCache`: where file content digests persist between loads (the account's connection folder); nil disables it.
     public static func load(snapshot: URL, account: Account, inventory: Inventory,
-                            allowUnboundPreview: Bool = true, progress: @escaping @Sendable (String) -> Void = { _ in }) throws -> AccountIndex {
+                            allowUnboundPreview: Bool = true, digestCache: URL? = nil,
+                            progress: @escaping @Sendable (String) -> Void = { _ in }) throws -> AccountIndex {
         progress("正在核验索引来源与数据库内容…")
         let base = FileManager.default.fileExists(atPath: snapshot.appendingPathComponent("db_storage").path)
             ? snapshot.appendingPathComponent("db_storage") : snapshot
@@ -107,7 +109,7 @@ public enum IndexReader {
                 kind: kind, summary: "\(kind.rawValue)消息", filePaths: paths, resolution: resolution))
         }
         // Include conversations with no media resources, and text-only messages, when message shards are supplied.
-        let resolverContext = MediaResolver.Context(account: account, inventory: inventory)
+        let resolverContext = MediaResolver.Context(account: account, inventory: inventory, persisted: DigestCache.read(digestCache))
         let messageFolder = base.appendingPathComponent("message")
         let shards = (try? FileManager.default.contentsOfDirectory(at: messageFolder, includingPropertiesForKeys: nil)) ?? []
         var seenShardKeys = Set<String>()
@@ -186,6 +188,7 @@ public enum IndexReader {
                 }
             }
         }
+        if let digestCache { DigestCache.write(resolverContext.digests, to: digestCache) }
         warnings.append("已适配普通图片，以及消息校验值与本地内容一致的文件和视频；语音、转发内媒体和共享数据库空间未完整覆盖。")
         return AccountIndex(accountID: account.id, conversations: Array(conversations.values),
             messages: messages.sorted { $0.timestamp > $1.timestamp }, warnings: warnings,

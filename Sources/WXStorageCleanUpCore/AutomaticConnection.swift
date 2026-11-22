@@ -201,17 +201,25 @@ public struct AutomaticConnection: Sendable {
         }
         try Task.checkCancellation()
         progress(.init(phase: "正在刷新账号数据并建立只读索引…", verified: names.count, total: names.count))
-        let fresh = try Scanner.scan(root: inventory.root, application: application, progress: { scan in
+        let fresh = try Scanner.scan(root: inventory.root, application: application,
+            related: inventory.relatedLocations.map { URL(fileURLWithPath: $0.path) }, progress: { scan in
             progress(.init(phase: "正在刷新账号附件清单：\(scan.count) 个文件…", verified: names.count, total: names.count))
         })
         guard let freshAccount = fresh.accounts.first(where: { $0.id == account.id }) else { throw StorageError.invalid("连接后未找到所选账号，请重新扫描。") }
-        let snapshot = try SnapshotService.create(account: freshAccount, inventory: fresh, keyFile: keys, progress: { text in
+        let snapshot = try SnapshotService.create(account: freshAccount, inventory: fresh, keyFile: keys,
+            destination: store.snapshotDirectory, progress: { text in
             progress(.init(phase: text, verified: names.count, total: names.count))
         })
-        let index = try IndexReader.load(snapshot: snapshot, account: freshAccount, inventory: fresh, progress: { text in
+        // Only the snapshot a saved connection uses is kept; a failed connection leaves none behind.
+        var saved = false
+        defer { if !saved { store.removeSnapshot(snapshot) } }
+        let index = try IndexReader.load(snapshot: snapshot, account: freshAccount, inventory: fresh,
+            digestCache: store.digestCacheFile(root: fresh.root, accountID: account.id), progress: { text in
             progress(.init(phase: text, verified: names.count, total: names.count))
         })
         try store.save(accountID: account.id, root: fresh.root, snapshot: snapshot)
+        saved = true
+        store.pruneUnusedSnapshots()
         progress(.init(phase: "所选账号已连接", verified: names.count, total: names.count))
         return AutomaticConnectionResult(inventory: fresh, index: index, reusedKeys: reused)
     }

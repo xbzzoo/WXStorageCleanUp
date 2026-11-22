@@ -13,11 +13,16 @@ final class StorageTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("WeChatStorageTests-" + UUID().uuidString)
         try FileSafety.privateDirectory(url); temporaryDirectories.append(url); return url
     }
-    func environment() throws -> (DemoEnvironment, Inventory, AccountIndex, Analysis) {
-        let demo = try DemoFactory.create(parent: temporary())
+    func environment(includeUnassigned: Bool = false) throws -> (DemoEnvironment, Inventory, AccountIndex, Analysis) {
+        let demo = try DemoFactory.create(parent: temporary(), includeUnassigned: includeUnassigned)
         let inventory = try Scanner.scan(root: demo.root)
         let index = try IndexReader.load(snapshot: demo.snapshot, account: inventory.accounts[0], inventory: inventory)
         return (demo, inventory, index, Analysis(inventory: inventory, indexes: [index]))
+    }
+    /// The demo's standalone unassigned files: single-file candidates without hardlinks.
+    func singleFilePlan(_ analysis: Analysis, account: String) throws -> CleanupPlan {
+        let paths = Set(analysis.unassignedAttachments.filter { $0.accountID == account && $0.identity.links == 1 }.map(\.relativePath))
+        return try CleanupPlanner.planUnassigned(analysis: analysis, relativePaths: paths, accountID: account)
     }
     func testScanCountsFilesAndDeduplicatesHardlinks() throws {
         let (_, inventory, _, analysis) = try environment()
@@ -57,8 +62,9 @@ final class StorageTests: XCTestCase {
         let blocked = try Scanner.scan(root: demo.root)
         XCTAssertEqual(blocked.blockedAccountIDs, ["demo_account"])
         let index = try IndexReader.load(snapshot: demo.snapshot, account: blocked.accounts[0], inventory: blocked)
-        XCTAssertThrowsError(try CleanupPlanner.plan(analysis: Analysis(inventory: blocked, indexes: [index]),
-            conversationIDs: Set(index.conversations.map(\.id))))
+        let blockedAnalysis = Analysis(inventory: blocked, indexes: [index])
+        let chat = try XCTUnwrap(blockedAnalysis.conversations.first { !$0.filePaths.isEmpty })
+        XCTAssertThrowsError(try CleanupPlanner.planConversation(analysis: blockedAnalysis, conversationID: chat.id, accountID: "demo_account"))
     }
     func testFileSafetyRejectsTraversalAndSymlinkedParent() throws {
         let root = try temporary()
@@ -152,25 +158,14 @@ final class StorageTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: inventory.root.appendingPathComponent(directory.relativePath).path))
     }
 
-    func testExplicitSharedOptionExpandsOnlyMatchingPhysicalAttachments() throws {
-        let (_, inventory, index, analysis) = try environment()
-        let linked = try XCTUnwrap(inventory.files.first { $0.category == .attachment && $0.identity.links > 1 })
-        let message = try XCTUnwrap(index.messages.first { $0.filePaths.contains(linked.relativePath) })
-        let plan = try CleanupPlanner.plan(analysis: analysis, messageIDs: [message.id], allowedAccountID: index.accountID, includeOtherReferences: true)
-        let paths = Set(inventory.files.filter { $0.identity.physicalID == linked.identity.physicalID && $0.category == .attachment }.map(\.relativePath))
-        XCTAssertGreaterThan(paths.count, 1)
-        XCTAssertTrue(paths.isSubset(of: Set(plan.candidates.map(\.relativePath))))
-        XCTAssertTrue(plan.includesOtherReferences)
-        XCTAssertTrue(plan.candidates.allSatisfy { paths.contains($0.relativePath) })
-    }
-
     func testUnboundSnapshotOnlyAllowsPreview() throws {
         let (demo, inventory, _, _) = try environment()
         try FileManager.default.removeItem(at: demo.snapshot.appendingPathComponent("source-binding.json"))
         let index = try IndexReader.load(snapshot: demo.snapshot, account: inventory.accounts[0], inventory: inventory)
         XCTAssertFalse(index.trustedBinding)
         let analysis = Analysis(inventory: inventory, indexes: [index])
-        XCTAssertThrowsError(try CleanupPlanner.plan(analysis: analysis, conversationIDs: Set(index.conversations.map(\.id))))
+        let chat = try XCTUnwrap(analysis.conversations.first { !$0.filePaths.isEmpty })
+        XCTAssertThrowsError(try CleanupPlanner.planConversation(analysis: analysis, conversationID: chat.id, accountID: index.accountID))
     }
     func testSnapshotRejectsOtherAccountAndTamperedContent() throws {
         let (demo, inventory, _, _) = try environment()
@@ -187,33 +182,10 @@ final class StorageTests: XCTestCase {
         let handle = try FileHandle(forWritingTo: file); try handle.seekToEnd(); try handle.write(contentsOf: Data([0])); try handle.close()
         XCTAssertThrowsError(try IndexReader.load(snapshot: demo.snapshot, account: inventory.accounts[0], inventory: inventory))
     }
-    func testMessageSelectionProtectsOtherReferences() throws {
-        let (_, _, _, analysis) = try environment()
-        let grouped = Dictionary(grouping: analysis.messages.filter { $0.kind == .image && !$0.filePaths.isEmpty }, by: { $0.filePaths[0] })
-        let shared = try XCTUnwrap(grouped.values.first { $0.count == 2 })
-        let one = try CleanupPlanner.plan(analysis: analysis, messageIDs: [shared[0].id])
-        XCTAssertEqual(one.candidates.count, 0)
-        XCTAssertTrue(one.skipped.contains { $0.contains("未选中") })
-        let both = try CleanupPlanner.plan(analysis: analysis, messageIDs: Set(shared.map(\.id)))
-        XCTAssertEqual(both.candidates.count, 1)
-    }
-    func testChatSelectionIncludesSelectedHardlinkedPaths() throws {
-        let (_, _, index, analysis) = try environment()
-        let plan = try CleanupPlanner.plan(analysis: analysis, conversationIDs: Set(index.conversations.map(\.id)))
-        XCTAssertEqual(plan.candidates.count, 14)
-        XCTAssertTrue(plan.candidates.contains { $0.expectedIdentity.links > 1 })
-        XCTAssertTrue(plan.candidates.allSatisfy { $0.relativePath.contains("/msg/") && !$0.relativePath.contains("db_storage") })
-    }
     func testExecutionAndRestoreRoundTrip() throws {
-        let (_, _, _, analysis) = try environment()
-        let message = try XCTUnwrap(analysis.messages.first { message in
-            guard message.kind == .image, let path = message.filePaths.first else { return false }
-            return analysis.references[path]?.count == 1 && analysis.inventory.files.first(where: { $0.relativePath == path })?.identity.links == 1
-        })
-        let plan = try CleanupPlanner.plan(analysis: analysis, messageIDs: [message.id])
-        // Pick a non-hardlinked item if the first message happens to be shared.
-        let actual = plan.candidates.isEmpty ? try CleanupPlanner.plan(analysis: analysis,
-            conversationIDs: [analysis.conversations.first { $0.conversation.internalID == "filehelper" }!.id]) : plan
+        let (_, _, index, analysis) = try environment(includeUnassigned: true)
+        let actual = try singleFilePlan(analysis, account: index.accountID)
+        XCTAssertEqual(actual.candidates.count, 2)
         let trash = try temporary()
         let service = CleanupService(journalDirectory: try temporary())
         let record = try service.execute(actual, processIsRunning: { false }, trash: { url in
@@ -221,14 +193,14 @@ final class StorageTests: XCTestCase {
             try FileManager.default.moveItem(at: url, to: target); return target
         })
         XCTAssertEqual(record.trashedCount, actual.candidates.count)
+        for item in actual.candidates { XCTAssertFalse(FileManager.default.fileExists(atPath: actual.root.appendingPathComponent(item.relativePath).path)) }
         let restored = try service.restore(record, processIsRunning: { false })
         XCTAssertEqual(restored.restoredCount, actual.candidates.count)
         for item in actual.candidates { XCTAssertTrue(FileManager.default.fileExists(atPath: actual.root.appendingPathComponent(item.relativePath).path)) }
     }
     func testRestoreNeverOverwritesNewFile() throws {
-        let (_, _, _, analysis) = try environment()
-        let chat = try XCTUnwrap(analysis.conversations.first { $0.conversation.internalID == "filehelper" })
-        let plan = try CleanupPlanner.plan(analysis: analysis, conversationIDs: [chat.id])
+        let (_, _, index, analysis) = try environment(includeUnassigned: true)
+        let plan = try singleFilePlan(analysis, account: index.accountID)
         let trash = try temporary(), service = CleanupService(journalDirectory: try temporary())
         let record = try service.execute(plan, processIsRunning: { false }, trash: { url in
             let target = trash.appendingPathComponent(UUID().uuidString); try FileManager.default.moveItem(at: url, to: target); return target
@@ -240,9 +212,8 @@ final class StorageTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: source), newData)
     }
     func testChangedFileAndRunningProcessStopExecution() throws {
-        let (_, _, _, analysis) = try environment()
-        let chat = try XCTUnwrap(analysis.conversations.first { $0.conversation.internalID == "filehelper" })
-        let plan = try CleanupPlanner.plan(analysis: analysis, conversationIDs: [chat.id])
+        let (_, _, index, analysis) = try environment(includeUnassigned: true)
+        let plan = try singleFilePlan(analysis, account: index.accountID)
         let service = CleanupService(journalDirectory: try temporary())
         XCTAssertThrowsError(try service.execute(plan, processIsRunning: { true }, trash: { $0 }))
         let url = plan.root.appendingPathComponent(plan.candidates[0].relativePath)
@@ -304,12 +275,12 @@ final class StorageTests: XCTestCase {
         XCTAssertTrue(files.allSatisfy { $0.filePaths.count == 1 })
         XCTAssertEqual(files[0].filePaths, files[1].filePaths)
         XCTAssertEqual(analysis.references[files[0].filePaths[0]]?.count, 2)
-        let selectedChat = files[0].conversationID
-        let plan = try CleanupPlanner.plan(analysis: analysis, conversationIDs: [selectedChat])
-        XCTAssertFalse(plan.candidates.contains { $0.relativePath == files[0].filePaths[0] })
+        // Each chat that references the document lists it among its attachments.
+        for message in files {
+            XCTAssertTrue(analysis.conversations.first { $0.id == message.conversationID }?.filePaths.contains(files[0].filePaths[0]) == true)
+        }
         let video = try XCTUnwrap(analysis.messages.first { $0.kind == .video })
         XCTAssertEqual(video.filePaths.count, 1)
-        XCTAssertEqual(try CleanupPlanner.plan(analysis: analysis, messageIDs: [video.id]).candidates.count, 1)
     }
 
     func testDocumentRequiresContentHashAndRejectsTraversalAndCards() throws {
@@ -325,10 +296,42 @@ final class StorageTests: XCTestCase {
         XCTAssertTrue(try MediaResolver.resolve(xml: entity, kind: .file, account: account, inventory: inventory).paths.isEmpty)
     }
 
+    func testChatSummaryCountsSharedAttachmentsOnce() throws {
+        let (_, inventory, index, analysis) = try environment()
+        let summary = try XCTUnwrap(analysis.chatSummaries()[index.accountID])
+        let chats = analysis.conversations.filter { $0.conversation.accountID == index.accountID }
+        let unique = Set(chats.flatMap(\.filePaths))
+        let files = Dictionary(uniqueKeysWithValues: inventory.files.map { ($0.relativePath, $0) })
+        XCTAssertEqual(summary.chats, chats.count)
+        XCTAssertEqual(summary.namedChats, 4)
+        XCTAssertEqual(summary.files, unique.count)
+        XCTAssertEqual(summary.messages, index.messages.count)
+        XCTAssertEqual(summary.logicalBytes, unique.reduce(0) { $0 + files[$1]!.identity.bytes })
+        // The document referenced from two chats is in both chat totals but counted once here.
+        XCTAssertLessThan(summary.logicalBytes, chats.reduce(0) { $0 + $1.logicalBytes })
+        // The hardlinked image has two paths but one physical file.
+        XCTAssertLessThan(summary.allocatedBytes, unique.reduce(0) { $0 + files[$1]!.allocatedBytes })
+        XCTAssertEqual(summary.bytesByKind.values.reduce(0, +), summary.allocatedBytes)
+        XCTAssertEqual(summary.exclusiveBytes + summary.sharedBytes, summary.allocatedBytes)
+        XCTAssertGreaterThan(summary.bytesByKind[.image] ?? 0, 0)
+        XCTAssertGreaterThan(summary.bytesByKind[.video] ?? 0, 0)
+        let cleaned = try XCTUnwrap(chats.first { !$0.filePaths.isEmpty })
+        XCTAssertEqual(analysis.chatSummaries(excluding: [cleaned.id])[index.accountID]?.chats, summary.chats - 1)
+    }
+
+    func testZstdMessageBodiesDecodeRepeatedly() throws {
+        // A single-segment zstd frame with one raw block holding "hello".
+        let frame = Data([0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x05, 0x29, 0x00, 0x00]) + Data("hello".utf8)
+        guard MediaResolver.body(frame) != nil else { throw XCTSkip("libzstd is not available") }
+        let started = Date()
+        for _ in 0..<5_000 { XCTAssertEqual(MediaResolver.body(frame), "hello") }
+        print("PERFORMANCE zstd_bodies=5000 seconds=\(Date().timeIntervalSince(started))")
+    }
+
     func testSystemTrashAndRestoreForGeneratedFile() throws {
-        let (_, _, _, analysis) = try environment()
-        let video = try XCTUnwrap(analysis.messages.first { $0.kind == .video })
-        let plan = try CleanupPlanner.plan(analysis: analysis, messageIDs: [video.id])
+        let (_, _, index, analysis) = try environment(includeUnassigned: true)
+        let file = try XCTUnwrap(analysis.unassignedAttachments.first { $0.identity.links == 1 })
+        let plan = try CleanupPlanner.planUnassigned(analysis: analysis, relativePaths: [file.relativePath], accountID: index.accountID)
         let service = CleanupService(journalDirectory: try temporary())
         let record = try service.execute(plan, processIsRunning: { false })
         defer {
@@ -364,9 +367,8 @@ final class StorageTests: XCTestCase {
     }
 
     func testIndexChangesAfterPlanPreventAnyMove() throws {
-        let (_, _, _, analysis) = try environment()
-        let video = try XCTUnwrap(analysis.messages.first { $0.kind == .video })
-        let plan = try CleanupPlanner.plan(analysis: analysis, messageIDs: [video.id])
+        let (_, _, index, analysis) = try environment(includeUnassigned: true)
+        let plan = try singleFilePlan(analysis, account: index.accountID)
         let path = try XCTUnwrap(plan.sourceFiles.keys.first)
         let source = plan.root.appendingPathComponent(path)
         let writer = try FileHandle(forWritingTo: source); try writer.seekToEnd(); try writer.write(contentsOf: Data([0])); try writer.close()

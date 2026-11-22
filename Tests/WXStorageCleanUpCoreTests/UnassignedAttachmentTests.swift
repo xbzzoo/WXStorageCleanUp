@@ -46,7 +46,6 @@ final class UnassignedAttachmentTests: XCTestCase {
         XCTAssertTrue(files.contains { $0.identity.links > 1 })
         let plan = try CleanupPlanner.planUnassigned(analysis: analysis, relativePaths: Set(files.map(\.id)), accountID: "demo_account")
         XCTAssertEqual(plan.scope, .unassignedAttachments)
-        XCTAssertEqual(plan.selectedMessages, 0)
         XCTAssertEqual(plan.candidates.count, 3)
         XCTAssertEqual(plan.sharedPathCount, 1)
         XCTAssertTrue(plan.skipped.isEmpty)

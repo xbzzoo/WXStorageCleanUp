@@ -11,18 +11,53 @@ final class AccountConnectionTests: XCTestCase {
     }
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: temporary) }
 
-    func testAccountSwitchClearsSelectionAndInvalidAccountIsRejected() throws {
-        var selection = AccountSelection()
-        let accounts = [Account(id: "a", relativePath: "a"), Account(id: "b", relativePath: "b")]
-        try selection.select("a", available: accounts)
-        selection.setSelection(conversations: ["chat-a"], messages: ["message-a"])
-        try selection.select("a", available: accounts)
-        XCTAssertEqual(selection.messageIDs, ["message-a"])
-        try selection.select("b", available: accounts)
-        XCTAssertTrue(selection.conversationIDs.isEmpty)
-        XCTAssertTrue(selection.messageIDs.isEmpty)
-        XCTAssertThrowsError(try selection.select("c", available: accounts))
-        XCTAssertEqual(selection.accountID, "b")
+    func testReconnectRemovesOnlyTheSupersededSnapshot() throws {
+        let store = AccountConnectionStore(directory: temporary.appendingPathComponent("connections"))
+        let root = temporary.appendingPathComponent("Data")
+        let snapshots = temporary.appendingPathComponent("Snapshots")
+        func snapshot() throws -> URL {
+            let url = snapshots.appendingPathComponent(UUID().uuidString).appendingPathComponent("db_storage")
+            try FileSafety.privateDirectory(url); return url
+        }
+        let first = try snapshot(), second = try snapshot(), other = try snapshot()
+        try store.save(accountID: "a", root: root, snapshot: first)
+        try store.save(accountID: "b", root: root, snapshot: other)
+        try store.save(accountID: "a", root: root, snapshot: second)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.deletingLastPathComponent().path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: other.path))
+        XCTAssertEqual(store.saved(accountID: "a", root: root)?.snapshotPath, second.path)
+        // A previous snapshot outside the new snapshot's folder is never removed.
+        let outside = temporary.appendingPathComponent("elsewhere/\(UUID().uuidString)/db_storage")
+        try FileSafety.privateDirectory(outside)
+        try store.save(accountID: "c", root: root, snapshot: outside)
+        try store.save(accountID: "c", root: root, snapshot: try snapshot())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
+    }
+
+    func testOnlySnapshotsUsedBySavedConnectionsAreKept() throws {
+        XCTAssertEqual(AccountConnectionStore().snapshotDirectory.path, SnapshotService.defaultDirectory.path)
+        let store = AccountConnectionStore(directory: temporary.appendingPathComponent("connections"))
+        XCTAssertEqual(store.snapshotDirectory.path, temporary.appendingPathComponent("Snapshots").path)
+        let root = temporary.appendingPathComponent("Data")
+        func snapshot() throws -> URL {
+            let url = store.snapshotDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("db_storage")
+            try FileSafety.privateDirectory(url); return url
+        }
+        func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
+        let used = try snapshot(), leftover = try snapshot(), forgotten = try snapshot()
+        let unrelated = store.snapshotDirectory.appendingPathComponent("not-a-snapshot")
+        try FileSafety.privateDirectory(unrelated)
+        try store.save(accountID: "a", root: root, snapshot: used)
+        try store.save(accountID: "b", root: root, snapshot: forgotten)
+        // A just-written folder is within the grace period, as a snapshot still being created would be.
+        XCTAssertEqual(store.pruneUnusedSnapshots(), 0)
+        XCTAssertEqual(store.pruneUnusedSnapshots(now: Date().addingTimeInterval(3600)), 1)
+        XCTAssertFalse(exists(leftover.deletingLastPathComponent()))
+        XCTAssertTrue(exists(used) && exists(forgotten) && exists(unrelated))
+        try store.forget(accountID: "b", root: root)
+        XCTAssertFalse(exists(forgotten.deletingLastPathComponent()))
+        XCTAssertTrue(exists(used))
     }
 
     func testNamesAndMessagesStayScopedWhenAccountsHaveSameContactIDs() throws {
@@ -39,12 +74,12 @@ final class AccountConnectionTests: XCTestCase {
         XCTAssertNotEqual(helpers[0].conversation.name, helpers[1].conversation.name)
         XCTAssertTrue(helpers[0].filePaths.isDisjoint(with: helpers[1].filePaths))
         for usage in helpers {
-            let plan = try CleanupPlanner.plan(analysis: analysis, conversationIDs: [usage.id], allowedAccountID: usage.conversation.accountID)
+            let plan = try CleanupPlanner.planConversation(analysis: analysis, conversationID: usage.id, accountID: usage.conversation.accountID)
             XCTAssertEqual(plan.accountIDs, [usage.conversation.accountID])
             XCTAssertTrue(plan.candidates.allSatisfy { $0.relativePath.contains("/" + usage.conversation.accountID + "/") })
         }
-        XCTAssertThrowsError(try CleanupPlanner.plan(analysis: analysis,
-            conversationIDs: Set(helpers.map(\.id)), allowedAccountID: helpers[0].conversation.accountID))
+        XCTAssertThrowsError(try CleanupPlanner.planConversation(analysis: analysis,
+            conversationID: helpers[1].id, accountID: helpers[0].conversation.accountID))
     }
 
     func testConnectionCacheAndForgetAreIsolatedByRootAndAccount() throws {

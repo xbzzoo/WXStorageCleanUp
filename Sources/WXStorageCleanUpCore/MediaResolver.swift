@@ -2,12 +2,39 @@ import Foundation
 import CryptoKit
 import Darwin
 
+/// MD5 of a file's content, valid only while the file keeps the same identity (device, inode, size, mtime, links).
+struct DigestEntry: Codable, Equatable, Sendable {
+    let identity: FileIdentity
+    let md5: String
+}
+
+/// Persists content digests between launches, so unchanged files are not re-read on every index load.
+/// Holds no paths or names; entries are keyed by physical file and checked against the file's identity.
+enum DigestCache {
+    private struct Contents: Codable { let version: Int; let entries: [String: DigestEntry] }
+    static func read(_ url: URL?) -> [String: DigestEntry] {
+        guard let url, let data = try? Data(contentsOf: url),
+              let contents = try? JSONDecoder().decode(Contents.self, from: data), contents.version == 1 else { return [:] }
+        return contents.entries
+    }
+    /// Best effort: the cache only saves time, so a failed write is not an error.
+    static func write(_ entries: [String: DigestEntry], to url: URL) {
+        guard let data = try? JSONEncoder().encode(Contents(version: 1, entries: entries)) else { return }
+        try? FileSafety.privateDirectory(url.deletingLastPathComponent())
+        guard (try? data.write(to: url, options: .atomic)) != nil else { return }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+}
+
 /// Resolves only explicit message metadata, then verifies the bytes. A filename is never proof of ownership.
 enum MediaResolver {
     final class Context {
         var byName: [String: [StoredFile]] = [:]
-        var digests: [String: (FileIdentity, String)] = [:]
-        init(account: Account, inventory: Inventory) {
+        /// Digests used during this load; saved back as the next launch's cache, which also drops stale entries.
+        private(set) var digests: [String: DigestEntry] = [:]
+        private let persisted: [String: DigestEntry]
+        init(account: Account, inventory: Inventory, persisted: [String: DigestEntry] = [:]) {
+            self.persisted = persisted
             for file in inventory.files where file.accountID == account.id && file.category == .attachment {
                 let local = account.relativePath.isEmpty ? file.relativePath : String(file.relativePath.dropFirst(account.relativePath.count + 1))
                 if local.hasPrefix("msg/video/") {
@@ -23,6 +50,36 @@ enum MediaResolver {
                 }
             }
         }
+        /// The file's MD5, from this load or the persisted cache when its identity is unchanged, else read from disk.
+        func digest(of file: StoredFile, at url: URL) throws -> String {
+            let id = file.identity.physicalID
+            if let entry = digests[id] ?? persisted[id], entry.identity == file.identity {
+                digests[id] = entry
+                return entry.md5
+            }
+            let value = try MediaResolver.md5(url)
+            digests[id] = DigestEntry(identity: file.identity, md5: value)
+            return value
+        }
+    }
+
+    /// True when the XML declares a DTD or entity. XML keywords are ASCII, so a byte scan replaces a
+    /// locale-aware search that cost about a tenth of index loading.
+    static func declaresDTD(_ text: String) -> Bool {
+        var text = text
+        return text.withUTF8 { bytes in
+            let keywords = [Array("doctype".utf8), Array("entity".utf8)]
+            var index = 0
+            while index + 1 < bytes.count {
+                if bytes[index] == UInt8(ascii: "<"), bytes[index + 1] == UInt8(ascii: "!") {
+                    for keyword in keywords where index + 2 + keyword.count <= bytes.count {
+                        if keyword.indices.allSatisfy({ bytes[index + 2 + $0] | 0x20 == keyword[$0] }) { return true }
+                    }
+                }
+                index += 1
+            }
+            return false
+        }
     }
 
     static func body(_ data: Data?) -> String? {
@@ -34,7 +91,7 @@ enum MediaResolver {
     static func imageIdentifier(_ xml: String?) -> String? {
         guard let xml, xml.utf8.count <= 16 * 1024 * 1024, let start = xml.firstIndex(of: "<") else { return nil }
         let text = String(xml[start...])
-        guard !text.localizedCaseInsensitiveContains("<!DOCTYPE"), !text.localizedCaseInsensitiveContains("<!ENTITY") else { return nil }
+        guard !declaresDTD(text) else { return nil }
         let metadata = MessageXML()
         let parser = XMLParser(data: Data(text.utf8)); parser.delegate = metadata; parser.shouldResolveExternalEntities = false
         guard parser.parse(), metadata.imageIDs.count == 1, let identifier = metadata.imageIDs.first,
@@ -48,7 +105,7 @@ enum MediaResolver {
             return ([], "\(kind.rawValue)消息", "消息正文尚未解码，已保护")
         }
         let text = String(xml[start...])
-        guard !text.localizedCaseInsensitiveContains("<!DOCTYPE"), !text.localizedCaseInsensitiveContains("<!ENTITY") else {
+        guard !declaresDTD(text) else {
             return ([], "\(kind.rawValue)消息", "消息含不支持的 XML 定义，已保护")
         }
         let metadata = MessageXML()
@@ -77,13 +134,7 @@ enum MediaResolver {
             try Task.checkCancellation()
             let url = try FileSafety.checkedURL(relativePath: file.relativePath, root: inventory.root)
             guard try FileSafety.identity(url) == file.identity else { continue }
-            let digest: String
-            if let cached = lookup.digests[file.identity.physicalID], cached.0 == file.identity {
-                digest = cached.1
-            } else {
-                digest = try md5(url)
-                lookup.digests[file.identity.physicalID] = (file.identity, digest)
-            }
+            let digest = try lookup.digest(of: file, at: url)
             guard try FileSafety.identity(url) == file.identity else { continue }
             if digest == expected { matched.append(file.relativePath) }
         }
@@ -93,7 +144,7 @@ enum MediaResolver {
         return (matched, title, "消息元数据与文件内容 MD5 校验一致")
     }
 
-    private static func md5(_ url: URL) throws -> String {
+    static func md5(_ url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
         var hash = Insecure.MD5()
         while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
@@ -102,28 +153,40 @@ enum MediaResolver {
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Resolved once per process: loading and unloading the library for every message body dominated index loading.
+    private struct ZstdLibrary: @unchecked Sendable {
+        typealias SizeFunction = @convention(c) (UnsafeRawPointer?, Int) -> UInt64
+        typealias DecodeFunction = @convention(c) (UnsafeMutableRawPointer?, Int, UnsafeRawPointer?, Int) -> Int
+        let frameContentSize: SizeFunction
+        let decompress: DecodeFunction
+
+        static let shared: ZstdLibrary? = {
+            let candidates: [String?] = [Bundle.main.privateFrameworksURL.map { $0.appendingPathComponent("libzstd.dylib").path },
+                              SnapshotService.developmentDependencyRoot.appendingPathComponent("lib/libzstd.dylib").path,
+                              "/opt/homebrew/opt/zstd/lib/libzstd.dylib", "/usr/local/opt/zstd/lib/libzstd.dylib", "/usr/lib/libzstd.dylib"]
+            for path in candidates.compactMap({ $0 }) {
+                guard let library = dlopen(path, RTLD_LOCAL | RTLD_LAZY) else { continue }
+                guard let sizeSymbol = dlsym(library, "ZSTD_getFrameContentSize"), let decodeSymbol = dlsym(library, "ZSTD_decompress") else {
+                    dlclose(library); continue
+                }
+                // Intentionally never closed: the handle stays valid for the life of the process.
+                return ZstdLibrary(frameContentSize: unsafeBitCast(sizeSymbol, to: SizeFunction.self),
+                                   decompress: unsafeBitCast(decodeSymbol, to: DecodeFunction.self))
+            }
+            return nil
+        }()
+    }
+
     private static func zstd(_ data: Data) -> Data? {
-        let candidates: [String?] = [Bundle.main.privateFrameworksURL.map { $0.appendingPathComponent("libzstd.dylib").path },
-                          SnapshotService.developmentDependencyRoot.appendingPathComponent("lib/libzstd.dylib").path,
-                          "/opt/homebrew/opt/zstd/lib/libzstd.dylib", "/usr/local/opt/zstd/lib/libzstd.dylib", "/usr/lib/libzstd.dylib"]
-        for path in candidates.compactMap({ $0 }) {
-            guard let library = dlopen(path, RTLD_LOCAL | RTLD_LAZY) else { continue }
-            defer { dlclose(library) }
-            typealias SizeFunction = @convention(c) (UnsafeRawPointer?, Int) -> UInt64
-            typealias DecodeFunction = @convention(c) (UnsafeMutableRawPointer?, Int, UnsafeRawPointer?, Int) -> Int
-            guard let sizeSymbol = dlsym(library, "ZSTD_getFrameContentSize"), let decodeSymbol = dlsym(library, "ZSTD_decompress") else { continue }
-            let sizeFunction = unsafeBitCast(sizeSymbol, to: SizeFunction.self)
-            let decode = unsafeBitCast(decodeSymbol, to: DecodeFunction.self)
-            let size = data.withUnsafeBytes { sizeFunction($0.baseAddress, data.count) }
-            guard size <= 16 * 1024 * 1024 else { return nil }
-            var output = Data(count: Int(size))
-            let result = output.withUnsafeMutableBytes { destination in data.withUnsafeBytes { source in
-                decode(destination.baseAddress, Int(size), source.baseAddress, data.count)
-            } }
-            guard result == Int(size) else { return nil }
-            return output
-        }
-        return nil
+        guard let library = ZstdLibrary.shared else { return nil }
+        let size = data.withUnsafeBytes { library.frameContentSize($0.baseAddress, data.count) }
+        guard size <= 16 * 1024 * 1024 else { return nil }
+        var output = Data(count: Int(size))
+        let result = output.withUnsafeMutableBytes { destination in data.withUnsafeBytes { source in
+            library.decompress(destination.baseAddress, Int(size), source.baseAddress, data.count)
+        } }
+        guard result == Int(size) else { return nil }
+        return output
     }
 }
 

@@ -43,6 +43,8 @@ import WXStorageCleanUpCore
                 exit(0)
             } catch { fputs("扫描失败：\(error.localizedDescription)\n", stderr); exit(1) }
         }
+        // Keep only the snapshots saved connections use; earlier versions left one behind per connection.
+        Task.detached(priority: .utility) { AccountConnectionStore().pruneUnusedSnapshots() }
     }
     var body: some Scene {
         WindowGroup("微空间") {

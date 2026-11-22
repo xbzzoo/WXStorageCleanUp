@@ -1,35 +1,41 @@
 import SwiftUI
 import AppKit
 import ImageIO
-import UniformTypeIdentifiers
 import WXStorageCleanUpCore
 
-private actor ImagePreviewCache {
+/// A decoded thumbnail. CGImage is immutable and thread-safe, so it may cross to the main actor.
+private final class PreviewImage: @unchecked Sendable {
+    let cgImage: CGImage
+    init(_ cgImage: CGImage) { self.cgImage = cgImage }
+    var size: NSSize { NSSize(width: cgImage.width, height: cgImage.height) }
+}
+
+/// Decodes previews concurrently on each caller's task; an actor here ran every decode one after another.
+/// NSCache is thread-safe, and holding the decoded image avoids re-encoding thumbnails to PNG.
+private final class ImagePreviewCache: @unchecked Sendable {
     static let shared = ImagePreviewCache()
-    private let cache = NSCache<NSString, NSData>()
-    init() { cache.totalCostLimit = 32 * 1024 * 1024 }
-    func image(root: URL, path: String, key: String, large: Bool) throws -> Data {
+    private let cache = NSCache<NSString, PreviewImage>()
+    init() { cache.totalCostLimit = 96 * 1024 * 1024 }
+    func image(root: URL, path: String, key: String, large: Bool) async throws -> PreviewImage {
         try Task.checkCancellation()
         let url = try FileSafety.checkedURL(relativePath: path, root: root)
         let identity = try FileSafety.identity(url)
         guard identity.bytes <= 32 * 1024 * 1024 else { throw StorageError.invalid("图片超过 32MB 预览限制。") }
         let cacheKey = "\(url.path)|\(identity.bytes)|\(identity.modifiedSeconds)|\(identity.modifiedNanos)|\(large)|\(key)" as NSString
-        if let value = cache.object(forKey: cacheKey) { return value as Data }
+        if let value = cache.object(forKey: cacheKey) { return value }
         let data = try LocalImageDecoder.decode(Data(contentsOf: url), imageKey: key)
         guard try FileSafety.identity(url) == identity else { throw StorageError.invalid("图片已变化，请重新加载。") }
         try Task.checkCancellation()
+        // Decode now, off the main thread, instead of lazily when the image is first drawn.
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: large ? 1600 : 320, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else {
+                kCGImageSourceThumbnailMaxPixelSize: large ? 1600 : 320, kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else {
             throw StorageError.invalid("图片格式暂不支持或文件已损坏，可在 Finder 中查看原文件。")
         }
-        let output = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else { throw StorageError.invalid("无法创建预览。") }
-        CGImageDestinationAddImage(destination, thumbnail, nil)
-        guard CGImageDestinationFinalize(destination) else { throw StorageError.invalid("无法创建预览。") }
-        let result = output as Data
-        cache.setObject(result as NSData, forKey: cacheKey, cost: result.count)
-        return result
+        let preview = PreviewImage(thumbnail)
+        cache.setObject(preview, forKey: cacheKey, cost: thumbnail.bytesPerRow * thumbnail.height)
+        return preview
     }
 }
 
@@ -59,9 +65,9 @@ struct ChatImageView: View {
         .task(id: path + imageKey + String(large)) {
             image = nil; failure = nil
             do {
-                let bytes = try await ImagePreviewCache.shared.image(root: root, path: path, key: imageKey, large: large)
+                let preview = try await ImagePreviewCache.shared.image(root: root, path: path, key: imageKey, large: large)
                 guard !Task.isCancelled else { return }
-                image = NSImage(data: bytes)
+                image = NSImage(cgImage: preview.cgImage, size: preview.size)
             } catch { if !Task.isCancelled { failure = error.localizedDescription } }
         }
         .sheet(isPresented: $expanded) {

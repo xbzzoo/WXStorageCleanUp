@@ -69,7 +69,7 @@ struct MainView: View {
         .alert("操作未完成", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("知道了", role: .cancel) { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
-        .alert("附件已移入废纸篓，空间尚未释放", isPresented: Binding(
+        .alert("已移入废纸篓，空间尚未释放", isPresented: Binding(
             get: { model.cleanupCompletion != nil },
             set: { if !$0 { model.cleanupCompletion = nil } }
         ), presenting: model.cleanupCompletion) { record in
@@ -88,13 +88,14 @@ struct MainView: View {
             case .overview: OverviewView()
             case .chats: ChatsView()
             case .unassigned: UnassignedAttachmentsView()
+            case .legacy: LegacyDataView()
             case .history: HistoryView()
             }
         }
     }
     private var header: some View {
       VStack(alignment: .leading, spacing: 12) {
-        if model.page == .unassigned {
+        if model.page == .unassigned || model.page == .legacy {
             Button { model.page = .overview } label: {
                 Label("返回空间概览", systemImage: "chevron.left")
             }.buttonStyle(.link).keyboardShortcut("[", modifiers: .command)
@@ -134,6 +135,7 @@ struct MainView: View {
         case .overview: "看清空间去向，再决定整理哪些内容"
         case .chats: "按聊天查看和清理全部本地附件，也可打开 Finder 文件夹"
         case .unassigned: "查看尚未识别聊天归属的本地附件，按文件选择整理"
+        case .legacy: "按文件夹浏览旧版微信留下的数据，确认不再需要后整理"
         case .history: "查看移入废纸篓的项目，恢复仍可找回的附件"
         }
     }
@@ -206,55 +208,28 @@ struct MetricCard: View {
 
 struct OverviewView: View {
     @EnvironmentObject var model: AppModel
-    private let colors: [Color] = [.accentGreen, .blue, .orange, .purple, .gray]
+    /// Modules whose expansion differs from the default (only the selected account is expanded).
+    @State private var toggled = Set<String>()
     var body: some View {
         ScrollView {
             if let analysis = model.analysis {
                 let inventory = analysis.inventory
                 VStack(alignment: .leading, spacing: 24) {
-                    HStack(alignment: .top, spacing: 14) {
-                        MetricCard(title: "微信占用估算", value: SizeText.format(inventory.allocatedBytes + inventory.applicationAllocatedBytes),
-                            note: "扫描范围内数据 + 检测到的应用本体；APFS 共享块可能影响数值", icon: "internaldrive")
-                        MetricCard(title: "聊天附件", value: SizeText.format(inventory.files.filter { $0.category == .attachment }.reduce(0) { $0 + $1.identity.bytes }),
-                            note: "逻辑大小 · 图片、视频、文件等，包含尚未匹配到聊天的附件", icon: "photo.on.rectangle")
-                        MetricCard(title: "会话目录", value: "\(analysis.conversations.count)",
-                            note: "\(analysis.conversations.filter { $0.conversation.named }.count) 个已识别名称，\(analysis.messages.count) 条索引消息", icon: "bubble.left.and.bubble.right")
-                    }
-                    HStack {
-                        VStack(alignment: .leading, spacing: 7) {
-                            Text("当前账号其他文件 · \(SizeText.format(model.accountUnassigned.reduce(0) { $0 + $1.identity.bytes }))").font(.headline)
-                            Text("\(model.accountUnassigned.count) 个文件尚未归集到聊天。可查看位置并按文件选择清理。")
-                                .font(.callout).foregroundStyle(.secondary)
+                    if let breakdown = model.breakdown {
+                        let account = breakdown.total.module(StorageBreakdown.accountID(model.selectedAccount))
+                        let chats = breakdown.total.module(StorageBreakdown.chatsID(model.selectedAccount))
+                        HStack(alignment: .top, spacing: 14) {
+                            MetricCard(title: "微信总占用", value: SizeText.format(breakdown.total.allocatedBytes),
+                                note: "磁盘实际占用，等于下方各模块之和", icon: "internaldrive")
+                            MetricCard(title: "当前账号", value: SizeText.format(account?.allocatedBytes ?? 0),
+                                note: account == nil ? "扫描范围内没有新版账号目录" : "其中聊天附件 \(SizeText.format(chats?.allocatedBytes ?? 0))，与“聊天与消息”合计一致",
+                                icon: "person.crop.circle")
+                            MetricCard(title: "会话目录", value: "\(analysis.conversations.count)",
+                                note: "\(analysis.conversations.filter { $0.conversation.named }.count) 个已识别名称，\(analysis.messages.count) 条索引消息", icon: "bubble.left.and.bubble.right")
                         }
-                        Spacer()
-                        Button("查看其他文件") { model.page = .unassigned }.buttonStyle(.bordered)
-                    }.padding(22).background(Color.card, in: RoundedRectangle(cornerRadius: 14))
-                    VStack(alignment: .leading, spacing: 18) {
-                        HStack { Text("空间分布").font(.headline); Spacer(); Text("按路径逻辑大小").font(.caption).foregroundStyle(.secondary) }
-                        GeometryReader { geometry in
-                            HStack(spacing: 3) {
-                                ForEach(Array(FileCategory.allCases.enumerated()), id: \.element) { index, category in
-                                    let bytes = categoryBytes(category, inventory)
-                                    if bytes > 0 {
-                                        RoundedRectangle(cornerRadius: 3).fill(colors[index])
-                                            .frame(width: max(2, (geometry.size.width - 12) * Double(bytes) / Double(max(1, inventory.logicalBytes))))
-                                    }
-                                }
-                            }
-                        }.frame(height: 17)
-                        ForEach(Array(FileCategory.allCases.enumerated()), id: \.element) { index, category in
-                            HStack {
-                                Circle().fill(colors[index]).frame(width: 8, height: 8)
-                                Text(category.rawValue); Spacer()
-                                Text(SizeText.format(categoryBytes(category, inventory))).monospacedDigit().foregroundStyle(.secondary)
-                            }.font(.callout)
-                        }
-                    }.padding(23).background(Color.card, in: RoundedRectangle(cornerRadius: 14))
-                    HStack(alignment: .top, spacing: 14) {
-                        MetricCard(title: "未分配到具体聊天", value: SizeText.format(analysis.unattributedBytes),
-                            note: "包括数据库、应用公共数据和其他文件，不按聊天均摊", icon: "tray")
-                        MetricCard(title: "应用本体", value: SizeText.format(inventory.applicationBytes),
-                            note: inventory.applicationScanComplete ? "逻辑大小 · 不参与附件清理" : "应用扫描不完整", icon: "app.badge")
+                        StorageBreakdownCard(breakdown: breakdown, isExpanded: isExpanded, toggle: toggle, open: model.open)
+                    } else {
+                        ProgressView("正在统计空间构成…").frame(maxWidth: .infinity).padding(40)
                     }
                     HStack {
                         VStack(alignment: .leading, spacing: 7) {
@@ -275,16 +250,133 @@ struct OverviewView: View {
                         }
                     }
                     Text("扫描范围：\(inventory.root.path)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    Text("未跟随 \(inventory.skippedLinks) 个链接项目；\(inventory.blockedAccountIDs.count) 个账号因内部链接而锁定清理。")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("数据逻辑大小 \(SizeText.format(inventory.logicalBytes)) · 已分配空间估算 \(SizeText.format(inventory.allocatedBytes)) · 硬链接按文件身份去重，不能把占用估算视为保证可回收空间。")
+                    if inventory.root.lastPathComponent != "Data" {
+                        Text("当前只扫描了所选目录。选择微信的 Data 目录，可一并统计内置浏览器、插件、日志等数据。")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    Text("另含应用程序与 \(inventory.relatedLocations.count) 个扩展和共享位置。未跟随 \(inventory.skippedLinks) 个链接项目（如容器中指向桌面、下载的系统链接，不属于微信占用）；\(inventory.blockedAccountIDs.count) 个账号因内部链接而锁定清理。")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text("占用按磁盘实际分配空间计算，硬链接只计一次。清理移入废纸篓后，清空废纸篓才会释放空间。")
                         .font(.caption).foregroundStyle(.secondary)
                 }.padding(.horizontal, 26).padding(.bottom, 26)
             }
         }
     }
-    private func categoryBytes(_ category: FileCategory, _ inventory: Inventory) -> Int64 {
-        inventory.files.filter { $0.category == category }.reduce(0) { $0 + $1.identity.bytes }
+    private func isExpanded(_ id: String) -> Bool {
+        (id == StorageBreakdown.accountID(model.selectedAccount)) != toggled.contains(id)
+    }
+    private func toggle(_ id: String) {
+        if toggled.contains(id) { toggled.remove(id) } else { toggled.insert(id) }
+    }
+}
+
+/// The "total → modules" tree: a stacked bar of top-level modules and expandable rows whose sizes add up to the total.
+private struct StorageBreakdownCard: View {
+    let breakdown: StorageBreakdown
+    let isExpanded: (String) -> Bool
+    let toggle: (String) -> Void
+    let open: (StorageModule.Link) -> Void
+    private var total: Int64 { breakdown.total.allocatedBytes }
+    private var modules: [StorageModule] { visible(breakdown.total.children) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("空间构成").font(.headline)
+                Spacer()
+                Text("各项合计 \(SizeText.format(total))，即微信总占用").font(.caption).foregroundStyle(.secondary)
+            }
+            GeometryReader { geometry in
+                let width = max(0, geometry.size.width - 2 * CGFloat(max(0, modules.count - 1)))
+                HStack(spacing: 2) {
+                    ForEach(modules) { module in
+                        Rectangle().fill(color(module.id))
+                            .frame(width: max(2, width * CGFloat(module.allocatedBytes) / CGFloat(max(1, total))))
+                    }
+                }
+            }
+            .frame(height: 14).background(Color.primary.opacity(0.06)).clipShape(RoundedRectangle(cornerRadius: 4))
+            VStack(spacing: 0) {
+                ForEach(modules) { module in
+                    row(module, depth: 0)
+                    if isExpanded(module.id) {
+                        ForEach(visible(module.children)) { child in row(child, depth: 1) }
+                    }
+                    Divider()
+                }
+            }
+            if breakdown.sharedPhysicalFiles > 0 {
+                Text("\(breakdown.sharedPhysicalFiles) 个文件可从多个路径访问（硬链接），只计入一个模块，优先计入聊天附件。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if !breakdown.complete {
+                Text("部分位置未能完整读取，合计可能偏小，详见下方扫描说明。").font(.caption).foregroundStyle(.orange)
+            }
+        }
+        .padding(23).background(Color.card, in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityIdentifier("storage-breakdown")
+    }
+
+    private func visible(_ modules: [StorageModule]) -> [StorageModule] {
+        modules.filter { $0.allocatedBytes > 0 }.sorted { $0.allocatedBytes > $1.allocatedBytes }
+    }
+    private func row(_ module: StorageModule, depth: Int) -> some View {
+        let expandable = depth == 0 && !visible(module.children).isEmpty
+        return HStack(spacing: 10) {
+            if depth == 0 {
+                Image(systemName: isExpanded(module.id) ? "chevron.down" : "chevron.right")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(width: 12).opacity(expandable ? 1 : 0)
+                Circle().fill(color(module.id)).frame(width: 9, height: 9)
+            } else {
+                Spacer().frame(width: 41)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(module.title).font(depth == 0 ? .callout.weight(.medium) : .callout).lineLimit(1)
+                Text(module.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            if let link = module.link {
+                Button(link.title) { open(link) }.buttonStyle(.link).font(.caption)
+            }
+            Text(SizeText.format(module.allocatedBytes)).font(.callout.monospacedDigit())
+                .frame(minWidth: 72, alignment: .trailing).fixedSize()
+            Text(percent(module.allocatedBytes)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                .frame(width: 40, alignment: .trailing)
+        }
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .onTapGesture { if expandable { toggle(module.id) } }
+        .help(module.detail)
+    }
+    private func percent(_ bytes: Int64) -> String {
+        let value = Double(bytes) / Double(max(1, total)) * 100
+        return value < 1 ? "<1%" : "\(Int(value.rounded()))%"
+    }
+    /// Accounts share the green, each one lighter, so several accounts stay distinguishable in the bar.
+    private func color(_ id: String) -> Color {
+        let accounts = breakdown.total.children.filter { $0.id.hasPrefix("account:") }.map(\.id)
+        if let index = accounts.firstIndex(of: id) { return Color.accentGreen.opacity(max(0.35, 1 - 0.3 * Double(index))) }
+        return Self.color(id)
+    }
+    static func color(_ id: String) -> Color {
+        if id.hasPrefix("account:") { return .accentGreen }
+        switch id {
+        case "browser": return .blue
+        case "plugins": return .indigo
+        case "logs": return .orange
+        case "app-cache": return .yellow
+        case "backup": return .pink
+        case "shared-account": return .mint
+        case "legacy": return .purple
+        case "application": return .brown
+        case "related": return .cyan
+        default: return .gray
+        }
+    }
+}
+
+extension StorageModule.Link {
+    var title: String {
+        switch self { case .chats: "查看聊天"; case .unassigned, .legacy: "查看文件" }
     }
 }
 
@@ -295,6 +387,9 @@ struct ChatsView: View {
     @FocusState private var listIsFocused: Bool
 
     var body: some View {
+      VStack(spacing: 0) {
+        ChatSummaryBar(summary: model.currentChatSummary)
+            .padding(.horizontal, 14).padding(.top, 14)
         GeometryReader { geometry in
             let available = max(0, geometry.size.width - 9)
             let maximum = max(0, min(460, available - min(360, available * 0.55)))
@@ -327,6 +422,7 @@ struct ChatsView: View {
                     .clipped()
             }
         }
+      }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -337,8 +433,16 @@ struct ChatsView: View {
                 TextField("搜索聊天名或标识", text: $model.search).textFieldStyle(.plain)
             }.padding(12).background(Color.card, in: RoundedRectangle(cornerRadius: 8)).padding(14)
             HStack {
+                if !model.search.isEmpty {
+                    Text("匹配 \(model.visibleConversations.count) 个聊天").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                } else if model.currentChatSummary.sharedBytes > 0 {
+                    // How the rows add up to the total: each row also includes what it shares with other chats.
+                    let summary = model.currentChatSummary
+                    Text("合计 = 各聊天独占 \(SizeText.format(summary.exclusiveBytes)) + 共享 \(SizeText.format(summary.sharedBytes))")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                }
                 Spacer()
-                Text("按附件大小排序").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text("按占用排序").font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }.padding(.horizontal, 15).padding(.bottom, 8)
             ScrollViewReader { proxy in
               ScrollView {
@@ -384,6 +488,72 @@ struct ChatsView: View {
     }
 }
 
+/// Account-wide totals for the chats page: deduplicated attachment size, counts and a per-type breakdown.
+private struct ChatSummaryBar: View {
+    let summary: ChatSpaceSummary
+    private struct KindStyle { let kind: MediaKind; let color: Color }
+    private static let kinds = [KindStyle(kind: .image, color: .accentGreen), KindStyle(kind: .video, color: .blue),
+                                KindStyle(kind: .file, color: .orange), KindStyle(kind: .voice, color: .purple)]
+    private func bytes(_ kind: MediaKind) -> Int64 { summary.bytesByKind[kind] ?? 0 }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 22) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("聊天附件占用").font(.caption).foregroundStyle(.secondary)
+                Text(SizeText.format(summary.allocatedBytes))
+                    .font(.system(size: 22, weight: .semibold, design: .rounded)).monospacedDigit()
+                    .contentTransition(.numericText())
+            }.fixedSize()
+            figure(summary.chats, "个聊天")
+            figure(summary.files, "个附件")
+            figure(summary.messages, "条索引消息")
+            VStack(alignment: .leading, spacing: 8) {
+                distribution
+                ViewThatFits(in: .horizontal) { legend(withSizes: true); legend(withSizes: false) }
+            }.frame(minWidth: 150, maxWidth: .infinity)
+        }
+        .padding(.horizontal, 18).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.primary.opacity(0.05)))
+        .help("与“空间概览”中该账号的“聊天附件”一致：按磁盘实际占用计算，同一文件只计一次。合计 = 各聊天独占 \(SizeText.format(summary.exclusiveBytes)) + 多个聊天或硬链接共享 \(SizeText.format(summary.sharedBytes))；逻辑大小 \(SizeText.format(summary.logicalBytes))。")
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("chat-summary")
+    }
+    private func figure(_ value: Int, _ unit: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value.formatted()).font(.title3.weight(.semibold)).monospacedDigit()
+            Text(unit).font(.caption).foregroundStyle(.secondary)
+        }.fixedSize()
+    }
+    private var distribution: some View {
+        GeometryReader { geometry in
+            let visible = Self.kinds.filter { bytes($0.kind) > 0 }
+            let total = max(1, visible.reduce(Int64(0)) { $0 + bytes($1.kind) })
+            let width = max(0, geometry.size.width - 2 * CGFloat(max(0, visible.count - 1)))
+            HStack(spacing: 2) {
+                ForEach(visible, id: \.kind) { style in
+                    Rectangle().fill(style.color).frame(width: max(2, width * CGFloat(bytes(style.kind)) / CGFloat(total)))
+                }
+            }
+        }
+        .frame(height: 8)
+        .background(Color.primary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+    }
+    private func legend(withSizes: Bool) -> some View {
+        HStack(spacing: 12) {
+            if summary.files == 0 { Text("暂无本地附件") }
+            ForEach(Self.kinds.filter { bytes($0.kind) > 0 }, id: \.kind) { style in
+                HStack(spacing: 5) {
+                    Circle().fill(style.color).frame(width: 7, height: 7)
+                    Text(withSizes ? "\(style.kind.rawValue) \(SizeText.format(bytes(style.kind)))" : style.kind.rawValue)
+                }.lineLimit(1).fixedSize()
+            }
+        }.font(.caption).foregroundStyle(.secondary)
+    }
+}
+
 private struct ConversationListRow: View {
     let usage: ConversationUsage
     let onSelect: () -> Void
@@ -404,7 +574,7 @@ private struct ConversationListRow: View {
                             .help(usage.conversation.name)
                         Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail).help(subtitle)
                     }.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                    Text(SizeText.format(usage.logicalBytes))
+                    Text(SizeText.format(usage.occupiedBytes))
                         .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                         .lineLimit(1).fixedSize(horizontal: true, vertical: false)
                         .frame(width: 76, alignment: .trailing).layoutPriority(1)
@@ -428,11 +598,11 @@ struct ConversationDetailView: View {
                     Text(usage.conversation.internalID ?? usage.conversation.directoryHash).font(.caption.monospaced())
                         .foregroundStyle(.secondary).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
                     HStack(spacing: 24) {
-                        stat("附件逻辑大小", SizeText.format(usage.logicalBytes))
-                        stat("独占分配估算", SizeText.format(usage.allocatedBytes))
-                        stat("共享分配估算", SizeText.format(usage.sharedBytes))
+                        stat("附件占用", SizeText.format(usage.occupiedBytes))
+                        stat("独占（清理后可释放）", SizeText.format(usage.allocatedBytes))
+                        stat("与其他聊天或硬链接共享", SizeText.format(usage.sharedBytes))
                     }
-                    Text("\(usage.filePaths.count) 个本地附件，清理预览与上方附件逻辑大小使用相同清单。")
+                    Text("\(usage.filePaths.count) 个本地附件，逻辑大小 \(SizeText.format(usage.logicalBytes))；清理预览使用相同清单。")
                         .font(.caption).foregroundStyle(.secondary)
                     Button("查看聊天图片") { showingImages = true }
                     Button("在 Finder 中打开聊天附件文件夹") { model.openCurrentConversationFolder() }
@@ -498,7 +668,8 @@ struct ConversationDetailView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("清理该聊天的全部 \(usage.filePaths.count) 个本地附件；消息筛选不改变清理范围。").font(.caption).foregroundStyle(.secondary)
+                        Text("清理该聊天的全部 \(usage.filePaths.count) 个本地附件，文字消息保留；消息筛选不改变清理范围。如需删除文字，请先在这里清理附件，再在微信中清空该聊天的聊天记录，否则散放的附件会对应不到这个聊天。")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         HStack {
                             Button("清理此聊天…") { model.previewCurrentConversation() }
                                 .disabled(!model.canCleanCurrentConversation)
@@ -573,31 +744,40 @@ struct ConnectionView: View {
 struct PlanView: View {
     @EnvironmentObject var model: AppModel
     let plan: CleanupPlan
-    @State private var acceptsUnknownOwnership = false
+    @State private var acknowledged = false
+    private var needsAcknowledgement: Bool { plan.scope == .unassignedAttachments || plan.scope == .legacyData }
+    private var source: String {
+        switch plan.scope {
+        case .conversationAttachments: "该聊天目录与索引中发现的全部附件"
+        case .legacyData: "来自手动选择的历史版本数据"
+        default: "来自手动选择的其他文件"
+        }
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("确认本次附件清理").font(.title2.bold())
+            Text(plan.scope == .legacyData ? "确认清理历史版本数据" : "确认本次附件清理").font(.title2.bold())
             HStack {
-                MetricCard(title: "将移入废纸篓", value: "\(plan.candidates.count) 个项目",
-                    note: plan.scope == .conversationAttachments ? "该聊天目录与索引中发现的全部附件" : plan.scope == .unassignedAttachments ? "来自手动选择的其他文件" : "来自 \(plan.selectedMessages) 条选中消息", icon: "trash")
+                MetricCard(title: "将移入废纸篓", value: "\(plan.candidates.count) 个项目", note: source, icon: "trash")
                 MetricCard(title: "选中路径逻辑大小", value: SizeText.format(plan.logicalBytes), note: "去重分配空间估算 \(SizeText.format(plan.allocatedBytes))，不保证回收量", icon: "internaldrive")
             }
-            Text("相关附件将无法从原聊天位置打开。文字消息和数据库保留；旧附件不保证能重新下载。移入废纸篓后空间仍被占用，需在 Finder 审阅并清空相关项目。")
-                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if plan.scope == .legacyData {
+                Text("选中的旧版微信数据将移入废纸篓。其中若有旧版聊天记录数据库，未迁移到新版的旧聊天记录将无法再查看。已计入聊天附件的旧版图片、视频等保留在原位。移入废纸篓后空间仍被占用，需在 Finder 审阅并清空相关项目。")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("相关附件将无法从原聊天位置打开。文字消息和数据库保留；旧附件不保证能重新下载。移入废纸篓后空间仍被占用，需在 Finder 审阅并清空相关项目。")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if plan.scope == .conversationAttachments {
                 Text("该聊天的专属文件夹整目录移入废纸篓，共用目录中的分散附件单独处理。完成后直接更新列表，不重新扫描。文字消息和数据库保留。")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            if plan.includesOtherReferences {
-                Toggle("我确认移除预览中的其他路径，同一附件在其他聊天中也可能无法打开。", isOn: $acceptsUnknownOwnership)
-                    .toggleStyle(.checkbox).font(.callout)
-            }
-            if plan.scope == .unassignedAttachments {
+            if needsAcknowledgement {
                 if plan.sharedPathCount > 0 {
                     Text("包含 \(plan.sharedPathCount) 个共享文件路径。只移动勾选的路径，其他硬链接保留；仍有其他链接时不能回收该文件的数据空间。逻辑大小可能包含共享数据的重复引用。")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                Toggle("我已核对文件，了解“未匹配聊天”不代表无用，清理可能影响聊天中的附件。", isOn: $acceptsUnknownOwnership)
+                Toggle(plan.scope == .legacyData ? "我已确认需要的旧聊天记录已能在新版微信中查看或已备份，了解清理后可能无法再查看旧版聊天记录。"
+                       : "我已核对文件，了解“未匹配聊天”不代表无用，清理可能影响聊天中的附件。", isOn: $acknowledged)
                     .toggleStyle(.checkbox).font(.callout).fixedSize(horizontal: false, vertical: true)
             }
             List {
@@ -605,7 +785,10 @@ struct PlanView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text((item.relativePath as NSString).lastPathComponent).lineLimit(1)
                         Text(item.relativePath).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                        if item.isDirectory { Text("整文件夹移入废纸篓").font(.caption).foregroundStyle(.secondary) }
+                        if item.isDirectory {
+                            Text(plan.scope == .legacyData ? "整文件夹移入废纸篓 · \(SizeText.format(item.contentBytes ?? 0))" : "整文件夹移入废纸篓")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         if !item.isDirectory && item.expectedIdentity.links > 1 {
                             Text("共享文件 · \(item.expectedIdentity.links) 个硬链接 · 仅处理此路径")
                                 .font(.caption).foregroundStyle(.secondary)
@@ -623,7 +806,7 @@ struct PlanView: View {
                 Spacer()
                 Button("将 \(plan.candidates.count) 个项目移入废纸篓") { model.executePlan() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(plan.candidates.isEmpty || model.busy || ((plan.scope == .unassignedAttachments || plan.includesOtherReferences) && !acceptsUnknownOwnership))
+                    .disabled(plan.candidates.isEmpty || model.busy || (needsAcknowledgement && !acknowledged))
             }
         }.padding(28).frame(width: 700)
     }
@@ -651,7 +834,8 @@ struct HistoryView: View {
                             }
                             Text("移入废纸篓 \(record.trashedCount) 个 · 已恢复 \(record.restoredCount) 个 · 本次计划 \(SizeText.format(record.logicalBytes))")
                             if record.scope == .unassignedAttachments { Text("手动选择的其他文件").font(.caption).foregroundStyle(.secondary) }
-                            if let accounts = record.accountIDs { Text("账号：" + accounts.joined(separator: "、")).font(.caption).foregroundStyle(.secondary) }
+                            if record.scope == .legacyData { Text("历史版本数据").font(.caption).foregroundStyle(.secondary) }
+                            if let accounts = record.accountIDs, !accounts.isEmpty { Text("账号：" + accounts.joined(separator: "、")).font(.caption).foregroundStyle(.secondary) }
                             DisclosureGroup("逐项结果") {
                                 ForEach(record.items) { item in
                                     VStack(alignment: .leading, spacing: 4) {

@@ -7,10 +7,14 @@ struct UnassignedAttachmentsView: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("\(model.accountUnassigned.count) 个附件 · \(SizeText.format(model.accountUnassignedBytes))")
-                        .font(.headline)
+                    if let occupied = model.accountUnassignedOccupied {
+                        Text("\(model.accountUnassigned.count) 个附件 · 占用 \(SizeText.format(occupied))").font(.headline)
+                            .help("与“空间概览”中该账号的“其他附件”一致。与聊天附件共用存储（硬链接）的文件已计入聊天附件；列表逻辑大小合计 \(SizeText.format(model.accountUnassignedBytes))。")
+                    } else {
+                        Text("\(model.accountUnassigned.count) 个附件 · \(SizeText.format(model.accountUnassignedBytes))").font(.headline)
+                    }
                     Spacer()
-                    Text("逻辑大小 · 按大小排序").font(.caption).foregroundStyle(.secondary)
+                    Text("列表按逻辑大小排序").font(.caption).foregroundStyle(.secondary)
                 }
                 Text("已扫描到这些文件，但尚未匹配到具体聊天，可能仍被消息使用。点击附件行可在 Finder 中定位，勾选后可清理；清理会将选中路径移入废纸篓，共享硬链接可能仍占用空间。")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

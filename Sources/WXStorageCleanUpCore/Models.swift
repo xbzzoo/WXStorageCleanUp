@@ -35,13 +35,47 @@ public struct StoredFile: Identifiable, Codable, Sendable {
     public let category: FileCategory
     public let accountID: String?
     public let directoryChatHash: String?
+    /// Derived from the path once at scan time; filters and summaries read it for every file, often per keystroke.
+    public let attachmentKind: MediaKind
     public var name: String { (relativePath as NSString).lastPathComponent }
     public var modifiedAt: Date { Date(timeIntervalSince1970: TimeInterval(identity.modifiedSeconds)) }
-    public var attachmentKind: MediaKind {
-        let ext = (name as NSString).pathExtension.lowercased()
-        if relativePath.hasPrefix("msg/video/") || relativePath.contains("/msg/video/") || ["mp4", "mov", "m4v", "avi", "webm"].contains(ext) { return .video }
-        if relativePath.contains("/Img/") || ["jpg", "jpeg", "png", "gif", "heic", "webp"].contains(ext) { return .image }
-        if ["amr", "silk", "aac", "m4a", "mp3", "wav"].contains(ext) { return .voice }
+
+    init(relativePath: String, identity: FileIdentity, allocatedBytes: Int64, category: FileCategory,
+         accountID: String?, directoryChatHash: String?) {
+        self.relativePath = relativePath; self.identity = identity; self.allocatedBytes = allocatedBytes
+        self.category = category; self.accountID = accountID; self.directoryChatHash = directoryChatHash
+        attachmentKind = Self.kind(of: relativePath)
+    }
+    // The kind is not encoded; it is recomputed from the path, so the encoded form is unchanged.
+    private enum CodingKeys: String, CodingKey { case relativePath, identity, allocatedBytes, category, accountID, directoryChatHash }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(relativePath: try values.decode(String.self, forKey: .relativePath),
+                  identity: try values.decode(FileIdentity.self, forKey: .identity),
+                  allocatedBytes: try values.decode(Int64.self, forKey: .allocatedBytes),
+                  category: try values.decode(FileCategory.self, forKey: .category),
+                  accountID: try values.decodeIfPresent(String.self, forKey: .accountID),
+                  directoryChatHash: try values.decodeIfPresent(String.self, forKey: .directoryChatHash))
+    }
+
+    private static let videoExtensions: Set<String> = ["mp4", "mov", "m4v", "avi", "webm"]
+    private static let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "gif", "heic", "webp"]
+    private static let voiceExtensions: Set<String> = ["amr", "silk", "aac", "m4a", "mp3", "wav"]
+
+    static func kind(of relativePath: String) -> MediaKind {
+        // Compares path components: Foundation substring searches made this about 7 µs per file.
+        let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        let directories = parts.dropLast()
+        func folder(_ name: String) -> Bool { directories.contains { $0 == name } }
+        func folders(_ first: String, _ second: String) -> Bool {
+            zip(directories, directories.dropFirst()).contains { $0 == first && $1 == second }
+        }
+        let name = parts.last ?? ""
+        let ext = name.lastIndex(of: ".").map { name[name.index(after: $0)...].lowercased() } ?? ""
+        let legacy = relativePath.hasPrefix(LegacyLayout.prefix) && folders("Message", "MessageTemp")
+        if folders("msg", "video") || (legacy && folder("Video")) || videoExtensions.contains(ext) { return .video }
+        if folder("Img") || (legacy && folder("Image")) || imageExtensions.contains(ext) { return .image }
+        if (legacy && folder("Audio")) || voiceExtensions.contains(ext) { return .voice }
         return .file
     }
 }
@@ -62,6 +96,8 @@ public struct Inventory: Sendable {
     public let applicationBytes: Int64
     public let applicationAllocatedBytes: Int64
     public let applicationScanComplete: Bool
+    /// WeChat data outside the scanned folder (extension and group containers, preferences). Display only.
+    public var relatedLocations: [RelatedLocation] = []
     public var logicalBytes: Int64 { files.reduce(0) { $0 + $1.identity.bytes } }
     public var allocatedBytes: Int64 {
         var seen = Set<String>()
@@ -71,11 +107,13 @@ public struct Inventory: Sendable {
     }
     public var complete: Bool { warnings.isEmpty }
     public func removing(paths: Set<String>, directoryPrefixes: [String]) -> Inventory {
-        Inventory(root: root, accounts: accounts,
+        var result = Inventory(root: root, accounts: accounts,
             files: files.filter { file in !paths.contains(file.relativePath) && !directoryPrefixes.contains { file.relativePath.hasPrefix($0) } },
             warnings: warnings, skippedLinks: skippedLinks, blockedAccountIDs: blockedAccountIDs, scannedAt: scannedAt,
             applicationBytes: applicationBytes, applicationAllocatedBytes: applicationAllocatedBytes,
             applicationScanComplete: applicationScanComplete)
+        result.relatedLocations = relatedLocations
+        return result
     }
     public func url(for file: StoredFile) -> URL { root.appendingPathComponent(file.relativePath) }
 }
@@ -137,6 +175,8 @@ public struct ConversationUsage: Identifiable, Sendable {
     public let allocatedBytes: Int64
     public let sharedBytes: Int64
     public let messageCount: Int
+    /// The chat's disk usage: its own files plus files it shares with other chats or hardlinks.
+    public var occupiedBytes: Int64 { allocatedBytes + sharedBytes }
 }
 
 public struct Analysis: Sendable {
@@ -206,7 +246,9 @@ public struct Analysis: Sendable {
                 allocatedBytes: allocated, sharedBytes: shared,
                 messageCount: messageCounts[id] ?? 0))
         }
-        self.conversations = result.sorted { $0.logicalBytes > $1.logicalBytes }
+        self.conversations = result.sorted {
+            $0.occupiedBytes != $1.occupiedBytes ? $0.occupiedBytes > $1.occupiedBytes : $0.logicalBytes > $1.logicalBytes
+        }
         let allAssigned = Set(pathsByChat.values.flatMap { $0 })
         self.unassignedAttachments = inventory.files.filter {
             $0.category == .attachment && !allAssigned.contains($0.relativePath)
@@ -222,8 +264,55 @@ public struct Analysis: Sendable {
     }
 }
 
+/// Totals for the chats page, in the same unit as the overview's "聊天附件" module: allocated space with
+/// every physical file counted once. `allocatedBytes == exclusiveBytes + sharedBytes`.
+public struct ChatSpaceSummary: Equatable, Sendable {
+    public let chats: Int
+    public let namedChats: Int
+    public let files: Int
+    public let logicalBytes: Int64
+    public let allocatedBytes: Int64
+    /// Sum of every chat's own files (not in another chat, not hardlinked): what cleaning each chat frees.
+    public let exclusiveBytes: Int64
+    public var sharedBytes: Int64 { allocatedBytes - exclusiveBytes }
+    public let messages: Int
+    /// Allocated space per attachment type; sums to `allocatedBytes`.
+    public let bytesByKind: [MediaKind: Int64]
+    public static let empty = ChatSpaceSummary(chats: 0, namedChats: 0, files: 0, logicalBytes: 0,
+        allocatedBytes: 0, exclusiveBytes: 0, messages: 0, bytesByKind: [:])
+}
+
+extension Analysis {
+    /// Per-account totals over the listed chats; `removed` hides chats already cleaned in this session.
+    public func chatSummaries(excluding removed: Set<String> = []) -> [String: ChatSpaceSummary] {
+        let files = Dictionary(uniqueKeysWithValues: inventory.files.map { ($0.relativePath, $0) })
+        let byAccount = Dictionary(grouping: conversations.filter { !removed.contains($0.id) }, by: \.conversation.accountID)
+        return byAccount.mapValues { usages in
+            var paths = Set<String>(), physical = Set<String>(), bytesByKind = [MediaKind: Int64]()
+            var count = 0, logical: Int64 = 0, allocated: Int64 = 0
+            for usage in usages { paths.formUnion(usage.filePaths) }
+            // Sorted so a physical file reached through several paths is typed by the same path every time.
+            for path in paths.sorted() {
+                guard let file = files[path] else { continue }
+                count += 1; logical += file.identity.bytes
+                if physical.insert(file.identity.physicalID).inserted {
+                    allocated += file.allocatedBytes
+                    bytesByKind[file.attachmentKind, default: 0] += file.allocatedBytes
+                }
+            }
+            return ChatSpaceSummary(chats: usages.count, namedChats: usages.filter(\.conversation.named).count,
+                files: count, logicalBytes: logical, allocatedBytes: allocated,
+                exclusiveBytes: usages.reduce(0) { $0 + $1.allocatedBytes },
+                messages: usages.reduce(0) { $0 + $1.messageCount }, bytesByKind: bytesByKind)
+        }
+    }
+}
+
 public enum SizeText {
     public static func format(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowsNonnumericFormatting = false // "0 KB", not "Zero KB"
+        return formatter.string(fromByteCount: bytes)
     }
 }
